@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>word-view · rwml 解析 + 富样式渲染</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #f6f8fa; color: #1f2328; font: 14px/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+      .hidden { display: none !important; }
+      .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+        background: rgba(255,255,255,.92); backdrop-filter: blur(8px); border-bottom: 1px solid #e4e8ec; }
+      .brand { font-weight: 700; }
+      .brand .sub { font-weight: 400; color: #8b949e; font-size: 12px; margin-left: 8px; }
+      #meta { display: flex; gap: 6px; margin-left: auto; }
+      .chip { background: #eef1f4; border: 1px solid #e1e6ea; color: #57606a; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+      main { max-width: 960px; margin: 0 auto; padding: 28px 16px 0; }
+      .drop { background: #fff; border: 2px dashed #d0d7de; border-radius: 14px; padding: 40px 20px; text-align: center; cursor: pointer; transition: .15s; }
+      .drop:hover, .drop.drag { border-color: #0969da; background: #f3f8ff; }
+      .drop-icon { font-size: 32px; }
+      .drop-title { font-size: 16px; font-weight: 600; margin-top: 6px; }
+      .drop-formats { margin-top: 6px; color: #8b949e; font-size: 12px; letter-spacing: .06em; }
+      .samples { margin: 14px 0; text-align: center; }
+      .samples-label { color: #8b949e; font-size: 12px; margin-right: 6px; }
+      .sample-btn { border: 1px solid #d0d7de; background: #fff; border-radius: 999px; padding: 4px 14px; margin: 3px 4px; font-size: 13px; cursor: pointer; }
+      .sample-btn:hover { border-color: #0969da; color: #0969da; }
+      #status { margin-top: 24px; text-align: center; color: #57606a; padding: 32px 0; }
+      .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #d8dee4; border-top-color: #0969da; border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 10px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #error { margin-top: 24px; background: #fff5f5; border: 1px solid #ffcecb; border-radius: 10px; padding: 16px 20px; color: #cf222e; }
+      #viewer { margin-top: 8px; min-height: 200px; background: transparent; border: 0; border-radius: 0; box-shadow: none; }
+      footer { text-align: center; color: #8b949e; font-size: 12px; padding: 28px 0 40px; }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">word-view<span class="sub">rwml(Rust→WASM)解析 · 字体/字号/颜色/对齐/缩进/行距/表格样式还原</span></div>
+      <div id="meta" class="hidden"></div>
+    </header>
+    <main>
+      <section id="intake">
+        <div id="drop" class="drop">
+          <div class="drop-icon">📄</div>
+          <div class="drop-title">拖入 Word 文件,或点击选择</div>
+          <div class="drop-formats">DOC · DOCX(含 97-2003 二进制)</div>
+        </div>
+        <input id="file" type="file" hidden accept=".doc,.docx,.docm" />
+      </section>
+      <section class="samples"><span class="samples-label">或试用样例:</span><span id="samples-bar"></span></section>
+      <section id="status" class="hidden"><div class="spinner"></div><div id="status-text"></div></section>
+      <section id="error" class="hidden"><div id="error-text"></div></section>
+      <article id="viewer" class="hidden"></article>
+    </main>
+    <footer>解析:rwml 0.1.4(MIT)· 渲染:自研 DOM 渲染器 · 文件不出浏览器</footer>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>

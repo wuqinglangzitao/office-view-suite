@@ -1,0 +1,22 @@
+# path	pages	warnings
+synthetic/kitchen_sink.docx	1	FloatingShapePlaceholderOnly
+synthetic/comments.docx	1	-
+synthetic/revisions.docx	1	-
+synthetic/fields.docx	1	UnsupportedFieldEvaluation
+synthetic/hyperlinks.docx	1	-
+synthetic/nested_tables.docx	1	-
+synthetic/unsupported_objects.docx	1	ChartsPreservedButNotModeled|FloatingShapePlaceholderOnly|OleObjectsPreservedButNotModeled|UnsupportedMetafileImages
+synthetic/floating_altcontent_anchor.docx	1	FloatingShapePlaceholderOnly
+synthetic/floating_z_order_pair.docx	1	FloatingShapePlaceholderOnly
+synthetic/floating_wrap_policy.docx	1	FloatingShapePlaceholderOnly
+synthetic/floating_text_bearing.docx	1	FloatingShapePlaceholderOnly
+synthetic/style-hidden-tabs-table.docx	1	-
+synthetic/pagination-keep.docx	3	-
+synthetic/two-columns.docx	2	-
+synthetic/rtl-table.docx	1	-
+synthetic/table-cell-lists.docx	1	-
+synthetic/wrap-top-bottom.docx	1	FloatingShapePlaceholderOnly
+vendored/python-docx/blk-inner-content.docx	1	-
+vendored/python-docx/having-images.docx	1	-
+vendored/python-docx/sct-inner-content.docx	3	-
+vendored/python-docx/test.docx	1	-

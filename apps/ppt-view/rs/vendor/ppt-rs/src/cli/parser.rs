@@ -1,0 +1,535 @@
+//! Command-line argument parser using clap
+
+use clap::{Parser as ClapParser, Subcommand, ValueEnum};
+
+#[derive(ClapParser, Debug)]
+#[command(name = "pptcli")]
+#[command(about = "PowerPoint Generator - Create, read, and update PowerPoint 2007+ (.pptx) files")]
+#[command(
+    long_about = "pptcli - A command-line tool for generating PowerPoint presentations from Markdown, webpages, or programmatically.
+
+Examples:
+  # Create a simple presentation
+  pptcli create output.pptx --title \"My Presentation\" --slides 5
+
+  # Convert Markdown to PowerPoint
+  pptcli md2ppt slides.md presentation.pptx
+
+  # Auto-generate output filename from Markdown
+  pptcli md2ppt slides.md
+
+  # Convert webpage to PowerPoint (requires --features web2ppt)
+  pptcli web2ppt https://example.com -o output.pptx
+
+  # Validate a PPTX file
+  pptcli validate presentation.pptx
+
+  # Structured JSON report (CI-friendly)
+  pptcli validate presentation.pptx --json
+
+  # Show presentation information
+  pptcli info presentation.pptx"
+)]
+#[command(version)]
+pub struct Cli {
+    #[command(subcommand)]
+    pub command: Commands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum Commands {
+    /// Create a new presentation
+    #[command(
+        long_about = "Create a new PowerPoint presentation with the specified number of slides.
+
+Examples:
+  pptcli create output.pptx --title \"My Presentation\" --slides 5
+  pptcli create report.pptx --slides 10"
+    )]
+    Create {
+        /// Output file path (.pptx)
+        #[arg(value_name = "FILE", help = "Path to the output PPTX file")]
+        output: String,
+
+        /// Presentation title
+        #[arg(long, help = "Title of the presentation (stored in metadata)")]
+        title: Option<String>,
+
+        /// Number of slides to create
+        #[arg(long, default_value_t = 1, help = "Number of blank slides to create")]
+        slides: usize,
+
+        /// Template file to use
+        #[arg(
+            long,
+            help = "Template PPTX file — clones masters, layouts, and theme from the file"
+        )]
+        template: Option<String>,
+    },
+
+    /// Generate PPTX from Markdown file
+    #[command(
+        name = "md2ppt",
+        alias = "from-md",
+        alias = "from-markdown",
+        long_about = "Convert a Markdown file to a PowerPoint presentation.
+
+Supported Markdown Features:
+  # Heading      → New slide with title
+  ## Subheading  → Bold bullet point
+  - Bullet       → Bullet points (also *, +)
+  1. Numbered    → Numbered list items
+  **bold**       → Bold text
+  *italic*       → Italic text
+  `code`         → Inline code
+  > Blockquote   → Speaker notes
+  | Table |      → Tables (GFM style)
+  ```code```     → Code blocks (as shapes)
+  ```mermaid     → Mermaid diagrams (12 types)
+  ---            → Slide break (continuation)
+
+Example Markdown:
+  # Introduction
+  - Welcome to the presentation
+  - **Key point** with emphasis
+
+  # Data
+  | Name | Value |
+  |------|-------|
+  | A    | 100   |
+
+  > Speaker notes go here
+
+Examples:
+  pptcli md2ppt slides.md presentation.pptx
+  pptcli md2ppt slides.md --title \"My Presentation\"
+  pptcli md2ppt slides.md  # Auto-generates slides.pptx"
+    )]
+    Md2Ppt {
+        /// Input markdown file
+        #[arg(value_name = "INPUT", help = "Path to the input Markdown file")]
+        input: String,
+
+        /// Output PPTX file (optional: auto-generated from input if not provided)
+        #[arg(
+            value_name = "OUTPUT",
+            help = "Path to the output PPTX file (default: INPUT.pptx)"
+        )]
+        output: Option<String>,
+
+        /// Presentation title
+        #[arg(long, help = "Title of the presentation (overrides Markdown content)")]
+        title: Option<String>,
+    },
+
+    /// Show presentation information
+    #[command(long_about = "Display information about a PPTX file.
+
+Shows file size, modification date, and basic metadata.
+
+Example:
+  pptcli info presentation.pptx")]
+    Info {
+        /// PPTX file to inspect
+        #[arg(value_name = "FILE", help = "Path to the PPTX file to inspect")]
+        file: String,
+    },
+
+    /// Validate a PPTX file
+    #[command(long_about = "Validate a PPTX file structure and content.
+
+Checks for:
+- Valid ZIP structure
+- Required parts (presentation.xml, slide masters, etc.)
+- Content types and relationships
+- Presentation / slide / chart / theme consistency
+
+Prints a structured issue list (severity, category, path, message).
+Use --json for machine-readable output.")]
+    Validate {
+        /// PPTX file to validate
+        #[arg(value_name = "FILE")]
+        file: String,
+
+        /// Emit JSON instead of human-readable text
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Compare two presentations semantically (title, bullets, images, charts)
+    #[command(
+        long_about = "Compare two PPTX files at the slide level for CI and review.
+
+Reports title changes, added/removed slides, and per-slide field diffs
+(bullets, images, charts, tables, media). Exit code 0 when equal, 1 when different."
+    )]
+    Diff {
+        /// Baseline PPTX file
+        #[arg(value_name = "OLD")]
+        old: String,
+
+        /// Updated PPTX file
+        #[arg(value_name = "NEW")]
+        new: String,
+
+        /// Emit JSON report (CI-friendly)
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Batch-convert Markdown/HTML files in a directory
+    #[command(
+        long_about = "Convert every .md/.html file in INPUT_DIR to a separate .pptx in OUTPUT_DIR.
+
+Shared theme and template settings apply to every deck. Markdown parsing requires the cli feature.
+
+Examples:
+  pptcli batch slides/ output/
+  pptcli batch content/ decks/ --template corporate.pptx"
+    )]
+    Batch {
+        /// Directory containing .md, .markdown, .html, or .htm files
+        #[arg(value_name = "INPUT_DIR")]
+        input_dir: String,
+
+        /// Output directory (created if missing)
+        #[arg(value_name = "OUTPUT_DIR")]
+        output_dir: String,
+
+        /// Template PPTX applied to every generated deck
+        #[arg(long)]
+        template: Option<String>,
+    },
+
+    /// Export presentation to other formats
+    #[command(long_about = "Export PPTX to PDF, HTML, Markdown, or images.
+
+Formats:
+- pdf:      Pure-Rust PDF engine (no external dependencies)
+- html:     Self-contained HTML slideshow
+- markdown: GitHub-flavored Markdown (GFM tables, notes, frontmatter)
+- png:      Requires pdftoppm (from poppler)
+
+Use `--group-by-sections` with html or markdown when the deck defines slide sections.")]
+    Export {
+        /// Input PPTX file
+        #[arg(value_name = "INPUT")]
+        input: String,
+
+        /// Output file path
+        #[arg(value_name = "OUTPUT")]
+        output: String,
+
+        /// Output format (overrides extension)
+        #[arg(long, value_enum)]
+        format: Option<ExportFormat>,
+
+        /// Group HTML or Markdown export by presentation sections (requires sections in the deck)
+        #[arg(long)]
+        group_by_sections: bool,
+    },
+
+    /// Merge multiple presentations
+    #[command(long_about = "Merge multiple PPTX files into one.
+        
+Slides from all input files will be appended in order.")]
+    Merge {
+        /// Output PPTX file
+        #[arg(short, long)]
+        output: String,
+
+        /// Input PPTX files
+        #[arg(value_name = "INPUTS", required = true, num_args = 1..)]
+        inputs: Vec<String>,
+    },
+
+    /// Convert PDF to PowerPoint
+    #[command(
+        name = "pdf2ppt",
+        long_about = "Convert PDF pages to PowerPoint slides.
+        
+Requires `pdftoppm` (poppler) installed.
+Each page becomes a slide with the page image."
+    )]
+    Pdf2Ppt {
+        /// Input PDF file
+        #[arg(value_name = "INPUT")]
+        input: String,
+
+        /// Output PPTX file
+        #[arg(value_name = "OUTPUT")]
+        output: Option<String>,
+    },
+
+    /// Generate PPTX from HTML file
+    #[command(
+        name = "html2ppt",
+        alias = "from-html",
+        alias = "from-html-file",
+        long_about = "Convert an HTML file to a PowerPoint presentation.
+
+Converts HTML content into PowerPoint slides:
+  <h1>           → New slide with title
+  <h2>-<h6>      → Bold section headers
+  <p>            → Bullet points
+  <ul>/<ol>      → List items
+  <table>        → Tables with styled headers
+  <pre>/<code>   → Code blocks
+  <img>          → Image placeholders
+  <blockquote>   → Speaker notes
+  <hr>           → Slide break
+
+Examples:
+  pptcli html2ppt slides.html presentation.pptx
+  pptcli html2ppt slides.html --title \"My Presentation\"
+  pptcli html2ppt slides.html  # Auto-generates slides.pptx"
+    )]
+    Html2Ppt {
+        /// Input HTML file
+        #[arg(value_name = "INPUT", help = "Path to the input HTML file")]
+        input: String,
+
+        /// Output PPTX file (optional: auto-generated from input if not provided)
+        #[arg(
+            value_name = "OUTPUT",
+            help = "Path to the output PPTX file (default: INPUT.pptx)"
+        )]
+        output: Option<String>,
+
+        /// Presentation title
+        #[arg(long, help = "Title of the presentation (overrides HTML <title>)")]
+        title: Option<String>,
+
+        /// Maximum number of slides
+        #[arg(
+            long,
+            default_value_t = 50,
+            help = "Maximum number of slides to generate"
+        )]
+        max_slides: usize,
+
+        /// Maximum bullets per slide
+        #[arg(long, default_value_t = 10, help = "Maximum bullet points per slide")]
+        max_bullets: usize,
+
+        /// Disable image placeholders
+        #[arg(long, help = "Disable image placeholder extraction")]
+        no_images: bool,
+
+        /// Disable table extraction
+        #[arg(long, help = "Disable table extraction")]
+        no_tables: bool,
+
+        /// Disable code block extraction
+        #[arg(long, help = "Disable code block extraction")]
+        no_code: bool,
+    },
+
+    /// Generate PPTX from webpage (requires web2ppt feature)
+    #[cfg(feature = "web2ppt")]
+    #[command(
+        name = "web2ppt",
+        long_about = "Convert a webpage to a PowerPoint presentation.
+        
+Extracts:
+- Title and headings
+- Text content
+- Images
+- Tables
+- Code blocks"
+    )]
+    Web2Ppt {
+        /// URL to convert
+        #[arg(value_name = "URL")]
+        url: String,
+
+        /// Output file path (.pptx)
+        #[arg(short, long, default_value = "output.pptx")]
+        output: String,
+
+        /// Presentation title (overrides page title)
+        #[arg(long)]
+        title: Option<String>,
+
+        /// Maximum number of slides to generate
+        #[arg(long, default_value_t = 20)]
+        max_slides: usize,
+
+        /// Maximum bullet points per slide
+        #[arg(long, default_value_t = 7)]
+        max_bullets: usize,
+
+        /// Disable image extraction
+        #[arg(long)]
+        no_images: bool,
+
+        /// Disable table extraction
+        #[arg(long)]
+        no_tables: bool,
+
+        /// Disable code block extraction
+        #[arg(long)]
+        no_code: bool,
+
+        /// Don't add source URL to last slide
+        #[arg(long)]
+        no_source_url: bool,
+
+        /// Request timeout in seconds
+        #[arg(long, default_value_t = 30)]
+        timeout: u64,
+
+        /// Enable verbose logging
+        #[arg(short, long)]
+        verbose: bool,
+
+        /// Use the web2md pipeline (HTML→Markdown→Slides) for better content extraction
+        #[cfg(feature = "web2md")]
+        #[arg(long)]
+        web2md: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum ExportFormat {
+    Pdf,
+    Html,
+    #[value(name = "md", alias = "markdown")]
+    Md,
+    Png,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_create() {
+        let args = [
+            "pptcli".to_string(),
+            "create".to_string(),
+            "test.pptx".to_string(),
+            "--title".to_string(),
+            "My Presentation".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Create { output, title, .. } => {
+                assert_eq!(output, "test.pptx");
+                assert_eq!(title, Some("My Presentation".to_string()));
+            }
+            _ => panic!("Expected Create command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_md2ppt_with_output() {
+        let args = [
+            "pptcli".to_string(),
+            "md2ppt".to_string(),
+            "input.md".to_string(),
+            "output.pptx".to_string(),
+            "--title".to_string(),
+            "From Markdown".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Md2Ppt {
+                input,
+                output,
+                title,
+            } => {
+                assert_eq!(input, "input.md");
+                assert_eq!(output, Some("output.pptx".to_string()));
+                assert_eq!(title, Some("From Markdown".to_string()));
+            }
+            _ => panic!("Expected Md2Ppt command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_md2ppt_auto_output() {
+        let args = [
+            "pptcli".to_string(),
+            "md2ppt".to_string(),
+            "input.md".to_string(),
+            "--title".to_string(),
+            "From Markdown".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Md2Ppt {
+                input,
+                output,
+                title,
+            } => {
+                assert_eq!(input, "input.md");
+                assert_eq!(output, None);
+                assert_eq!(title, Some("From Markdown".to_string()));
+            }
+            _ => panic!("Expected Md2Ppt command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_export_markdown_with_sections() {
+        let args = [
+            "pptcli".to_string(),
+            "export".to_string(),
+            "deck.pptx".to_string(),
+            "outline.md".to_string(),
+            "--format".to_string(),
+            "md".to_string(),
+            "--group-by-sections".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Export {
+                input,
+                output,
+                format,
+                group_by_sections,
+            } => {
+                assert_eq!(input, "deck.pptx");
+                assert_eq!(output, "outline.md");
+                assert!(matches!(format, Some(ExportFormat::Md)));
+                assert!(group_by_sections);
+            }
+            _ => panic!("Expected Export command"),
+        }
+    }
+
+    #[test]
+    fn test_parse_from_md_alias() {
+        let args = [
+            "pptcli".to_string(),
+            "from-md".to_string(),
+            "input.md".to_string(),
+            "output.pptx".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Md2Ppt { input, output, .. } => {
+                assert_eq!(input, "input.md");
+                assert_eq!(output, Some("output.pptx".to_string()));
+            }
+            _ => panic!("Expected Md2Ppt command via from-md alias"),
+        }
+    }
+
+    #[test]
+    fn test_parse_info() {
+        let args = [
+            "pptcli".to_string(),
+            "info".to_string(),
+            "test.pptx".to_string(),
+        ];
+        let cli = Cli::parse_from(args.iter());
+        match cli.command {
+            Commands::Info { file } => {
+                assert_eq!(file, "test.pptx");
+            }
+            _ => panic!("Expected Info command"),
+        }
+    }
+}

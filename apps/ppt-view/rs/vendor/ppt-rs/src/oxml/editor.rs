@@ -1,0 +1,838 @@
+//! Presentation editing capabilities
+//!
+//! Provides functionality to modify existing PPTX files:
+//! - Add new slides
+//! - Update slide content
+//! - Remove slides
+//! - Modify presentation properties
+
+use super::slide::{ParsedSlide, SlideParser};
+use crate::exc::{PptxError, messages};
+use crate::generator::package_xml::{
+    create_presentation_rels_xml_full, slide_id_value, slide_rel_id,
+};
+use crate::generator::slide_content::SlideContent;
+use crate::generator::slide_xml::{create_slide_rels_xml, create_slide_xml_with_content};
+use crate::opc::Package;
+
+/// Presentation editor for modifying PPTX files
+pub struct PresentationEditor {
+    package: Package,
+    slide_count: usize,
+}
+
+impl PresentationEditor {
+    /// Open a PPTX file for editing
+    pub fn open(path: &str) -> Result<Self, PptxError> {
+        let package = Package::open(path)?;
+        let slide_count = Self::count_slides(&package);
+
+        Ok(PresentationEditor {
+            package,
+            slide_count,
+        })
+    }
+
+    /// Create a new presentation for editing
+    pub fn new() -> Self {
+        PresentationEditor {
+            package: Package::new(),
+            slide_count: 0,
+        }
+    }
+
+    /// Get number of slides
+    pub fn slide_count(&self) -> usize {
+        self.slide_count
+    }
+
+    /// Get a parsed slide by index (0-based)
+    pub fn get_slide(&self, index: usize) -> Result<ParsedSlide, PptxError> {
+        let slide_num = index + 1;
+        let path = format!("ppt/slides/slide{slide_num}.xml");
+        let xml = self
+            .package
+            .get_part(&path)
+            .ok_or_else(|| PptxError::NotFound(messages::slide_not_found(index)))?;
+
+        let xml_str = String::from_utf8_lossy(xml);
+        SlideParser::parse(&xml_str)
+    }
+
+    /// Add a new slide at the end
+    pub fn add_slide(&mut self, content: SlideContent) -> Result<usize, PptxError> {
+        let new_index = self.slide_count + 1;
+
+        // Generate slide XML
+        let slide_xml = create_slide_xml_with_content(new_index, &content, &[], None, &[]);
+        let slide_rels_xml = create_slide_rels_xml();
+
+        // Add slide file
+        let slide_path = format!("ppt/slides/slide{new_index}.xml");
+        self.package.add_part(slide_path, slide_xml.into_bytes());
+
+        // Add slide relationships
+        let rels_path = format!("ppt/slides/_rels/slide{new_index}.xml.rels");
+        self.package
+            .add_part(rels_path, slide_rels_xml.into_bytes());
+
+        // Update presentation.xml to include new slide
+        self.update_presentation_xml(new_index)?;
+
+        // Update presentation.xml.rels
+        self.update_presentation_rels(new_index)?;
+
+        // Update [Content_Types].xml
+        self.update_content_types(new_index)?;
+
+        self.slide_count = new_index;
+        Ok(new_index - 1) // Return 0-based index
+    }
+
+    /// Update slide content at index
+    pub fn update_slide(&mut self, index: usize, content: SlideContent) -> Result<(), PptxError> {
+        if index >= self.slide_count {
+            return Err(PptxError::NotFound(messages::slide_not_found(index)));
+        }
+
+        let slide_num = index + 1;
+        let slide_xml = create_slide_xml_with_content(slide_num, &content, &[], None, &[]);
+        let slide_path = format!("ppt/slides/slide{slide_num}.xml");
+
+        self.package.add_part(slide_path, slide_xml.into_bytes());
+        Ok(())
+    }
+
+    /// Remove a slide by index
+    pub fn remove_slide(&mut self, index: usize) -> Result<(), PptxError> {
+        if index >= self.slide_count {
+            return Err(PptxError::NotFound(messages::slide_not_found(index)));
+        }
+
+        let slide_num = index + 1;
+
+        // Remove slide file
+        let slide_path = format!("ppt/slides/slide{slide_num}.xml");
+        self.package.remove_part(&slide_path);
+
+        // Remove slide relationships
+        let rels_path = format!("ppt/slides/_rels/slide{slide_num}.xml.rels");
+        self.package.remove_part(&rels_path);
+
+        // Renumber remaining slides
+        for i in (slide_num + 1)..=self.slide_count {
+            self.renumber_slide(i, i - 1)?;
+        }
+
+        self.slide_count -= 1;
+
+        // Update presentation files
+        self.rebuild_presentation_xml()?;
+        self.rebuild_presentation_rels()?;
+        self.rebuild_content_types()?;
+
+        Ok(())
+    }
+
+    /// Duplicate an existing slide, inserting the copy immediately after the original.
+    pub fn duplicate_slide(&mut self, index: usize) -> Result<usize, PptxError> {
+        if index >= self.slide_count {
+            return Err(PptxError::NotFound(messages::slide_not_found(index)));
+        }
+
+        let slide_num = index + 1;
+        let new_index = index + 1;
+        let new_num = new_index + 1;
+
+        // Copy original slide content and relationships.
+        let slide_path = format!("ppt/slides/slide{slide_num}.xml");
+        let rels_path = format!("ppt/slides/_rels/slide{slide_num}.xml.rels");
+
+        let slide_data = self
+            .package
+            .get_part(&slide_path)
+            .ok_or_else(|| PptxError::NotFound(messages::slide_not_found(index)))?
+            .to_vec();
+        let rels_data = self
+            .package
+            .get_part(&rels_path)
+            .unwrap_or_default()
+            .to_vec();
+
+        // Shift slides after the original to make room for the duplicate.
+        for i in ((new_num + 1)..=(self.slide_count + 1)).rev() {
+            self.renumber_slide(i - 1, i)?;
+        }
+
+        // Insert duplicate at the newly vacated position.
+        self.package
+            .add_part(format!("ppt/slides/slide{new_num}.xml"), slide_data);
+        self.package.add_part(
+            format!("ppt/slides/_rels/slide{new_num}.xml.rels"),
+            rels_data,
+        );
+
+        self.slide_count += 1;
+
+        self.rebuild_presentation_xml()?;
+        self.rebuild_presentation_rels()?;
+        self.rebuild_content_types()?;
+
+        Ok(new_index)
+    }
+
+    /// Insert a new slide at the specified index.
+    pub fn insert_slide(
+        &mut self,
+        index: usize,
+        content: SlideContent,
+    ) -> Result<usize, PptxError> {
+        if index > self.slide_count {
+            return Err(PptxError::NotFound(messages::slide_not_found(index)));
+        }
+
+        let new_num = index + 1;
+
+        // Shift slides at and after the insertion point upward.
+        for i in ((new_num + 1)..=(self.slide_count + 1)).rev() {
+            self.renumber_slide(i - 1, i)?;
+        }
+
+        // Generate and insert the new slide.
+        let slide_xml = create_slide_xml_with_content(new_num, &content, &[], None, &[]);
+        let slide_rels_xml = create_slide_rels_xml();
+
+        self.package.add_part(
+            format!("ppt/slides/slide{new_num}.xml"),
+            slide_xml.into_bytes(),
+        );
+        self.package.add_part(
+            format!("ppt/slides/_rels/slide{new_num}.xml.rels"),
+            slide_rels_xml.into_bytes(),
+        );
+
+        self.slide_count += 1;
+
+        self.rebuild_presentation_xml()?;
+        self.rebuild_presentation_rels()?;
+        self.rebuild_content_types()?;
+
+        Ok(index)
+    }
+
+    /// Reorder a slide from one position to another.
+    pub fn reorder_slide(&mut self, from_index: usize, to_index: usize) -> Result<(), PptxError> {
+        if from_index >= self.slide_count || to_index >= self.slide_count {
+            return Err(PptxError::NotFound(messages::slide_not_found(
+                from_index.max(to_index),
+            )));
+        }
+
+        if from_index == to_index {
+            return Ok(());
+        }
+
+        let from_num = from_index + 1;
+        let to_num = to_index + 1;
+
+        // Extract the slide being moved.
+        let temp_slide_path = "ppt/slides/_temp_slide.xml".to_string();
+        let temp_rels_path = "ppt/slides/_rels/_temp_slide.xml.rels".to_string();
+
+        if let Some(data) = self
+            .package
+            .remove_part(&format!("ppt/slides/slide{from_num}.xml"))
+        {
+            self.package.add_part(temp_slide_path.clone(), data);
+        }
+        if let Some(data) = self
+            .package
+            .remove_part(&format!("ppt/slides/_rels/slide{from_num}.xml.rels"))
+        {
+            self.package.add_part(temp_rels_path.clone(), data);
+        }
+
+        if from_index < to_index {
+            // Shift intermediate slides left.
+            for i in from_num..to_num {
+                self.renumber_slide(i + 1, i)?;
+            }
+        } else {
+            // Shift intermediate slides right.
+            for i in (to_num..from_num).rev() {
+                self.renumber_slide(i, i + 1)?;
+            }
+        }
+
+        // Place the moved slide at the target position.
+        if let Some(data) = self.package.remove_part(&temp_slide_path) {
+            self.package
+                .add_part(format!("ppt/slides/slide{to_num}.xml"), data);
+        }
+        if let Some(data) = self.package.remove_part(&temp_rels_path) {
+            self.package
+                .add_part(format!("ppt/slides/_rels/slide{to_num}.xml.rels"), data);
+        }
+
+        self.rebuild_presentation_xml()?;
+        self.rebuild_presentation_rels()?;
+        self.rebuild_content_types()?;
+
+        Ok(())
+    }
+
+    /// Save the modified presentation
+    pub fn save(&self, path: &str) -> Result<(), PptxError> {
+        self.package.save(path)?;
+        Ok(())
+    }
+
+    // ---- TextFrame runtime editing (python-pptx parity) ----
+    //
+    // These methods let callers mutate a shape's `<p:txBody>` on imported
+    // decks without rebuilding the whole slide. The byte-level mutations are
+    // safe because ppt-rs slide XML has no nested `<p:sp>` and the helper
+    // functions in `super::text_editor` walk shapes with a depth counter.
+    //
+    // python-pptx analogues:
+    // - `Shape.has_text_frame`         → `shape_has_text_frame()`
+    // - `Shape.text_frame.text = "…"`  → `set_shape_text()`
+    // - `TextFrame.add_paragraph(...)` → `add_paragraph()` /
+    //                                    `add_paragraph_with_format()`
+    // - `Paragraph.level` /
+    //   `Paragraph.font.bold`          → encoded in `ParagraphEdit`
+
+    /// Whether the `shape_idx`-th shape on `slide_idx` has a `<p:txBody>`.
+    ///
+    /// `shape_idx` counts `<p:sp>` elements in document order (0-based) —
+    /// the same order as `PresentationReader::get_slide(i)?.shapes[j]`.
+    pub fn shape_has_text_frame(
+        &self,
+        slide_idx: usize,
+        shape_idx: usize,
+    ) -> Result<bool, PptxError> {
+        let slide_xml = self
+            .slide_xml_string(slide_idx)
+            .ok_or_else(|| PptxError::NotFound(messages::slide_not_found(slide_idx)))?;
+        let (sp_start, sp_end) = super::text_editor::nth_sp_range(&slide_xml, shape_idx)
+            .ok_or_else(|| PptxError::NotFound("shape".into()))?;
+        let sp_xml = &slide_xml[sp_start..sp_end];
+        Ok(super::text_editor::txbody_range(sp_xml).is_some())
+    }
+
+    /// Replace all paragraphs in the shape's text frame with a single
+    /// paragraph containing `text`. Existing paragraphs are dropped (matches
+    /// python-pptx's `_BaseShape.text = "…"`, which deletes all but the first
+    /// paragraph before setting it).
+    ///
+    /// Returns `Err(PptxError::NotFound)` if the slide or shape is missing
+    /// or the shape has no `<p:txBody>`.
+    pub fn set_shape_text(
+        &mut self,
+        slide_idx: usize,
+        shape_idx: usize,
+        text: &str,
+    ) -> Result<(), PptxError> {
+        let p = super::text_editor::ParagraphEdit::new(text).to_xml();
+        self.mutate_shape_txbody(slide_idx, shape_idx, move |_| p)
+    }
+
+    /// Append a new paragraph at level 0 to the shape's text frame.
+    /// python-pptx analogue: `tf.add_paragraph("…")`.
+    pub fn add_paragraph(
+        &mut self,
+        slide_idx: usize,
+        shape_idx: usize,
+        text: &str,
+    ) -> Result<(), PptxError> {
+        self.add_paragraph_with_format(
+            slide_idx,
+            shape_idx,
+            super::text_editor::ParagraphEdit::new(text),
+        )
+    }
+
+    /// Append a new paragraph with full formatting control.
+    ///
+    /// ```rust,no_run
+    /// use ppt_rs::oxml::{ParagraphEdit, PresentationEditor};
+    /// # let mut editor: PresentationEditor = unimplemented!();
+    /// let _ = editor.add_paragraph_with_format(
+    ///     0, 1,
+    ///     ParagraphEdit::new("Nested bullet")
+    ///         .with_level(1)
+    ///         .with_bold(true)
+    ///         .with_font_size(24),
+    /// );
+    /// ```
+    pub fn add_paragraph_with_format(
+        &mut self,
+        slide_idx: usize,
+        shape_idx: usize,
+        paragraph: super::text_editor::ParagraphEdit<'_>,
+    ) -> Result<(), PptxError> {
+        let para_xml = paragraph.to_xml();
+        self.mutate_shape_txbody(slide_idx, shape_idx, move |inner| {
+            // Append before `</p:txBody>` (which lives at the end of the
+            // inner slice we receive). Trim trailing whitespace so the new
+            // paragraph sits cleanly against the closing tag.
+            let mut s = inner.trim_end().to_owned();
+            s.push('\n');
+            s.push_str(&para_xml);
+            s
+        })
+    }
+
+    /// Convenience: set the title text on a slide (assumes shape index 0
+    /// is the title; layouts using a centered-title placeholder fall back to
+    /// `set_shape_text(0, …)` directly).
+    pub fn set_title_text(&mut self, slide_idx: usize, text: &str) -> Result<(), PptxError> {
+        self.set_shape_text(slide_idx, 0, text)
+    }
+
+    /// Read the current paragraphs of a shape (debug / round-trip helper).
+    pub fn shape_paragraphs(
+        &self,
+        slide_idx: usize,
+        shape_idx: usize,
+    ) -> Result<Vec<String>, PptxError> {
+        let slide_xml = self
+            .slide_xml_string(slide_idx)
+            .ok_or_else(|| PptxError::NotFound(messages::slide_not_found(slide_idx)))?;
+        Ok(super::text_editor::read_paragraphs(&slide_xml, shape_idx))
+    }
+
+    // Internal: read the slide XML as a `String` (clones the bytes — pptx
+    // files are small, and a single edit reads once then mutates the part).
+    fn slide_xml_string(&self, slide_idx: usize) -> Option<String> {
+        let slide_num = slide_idx + 1;
+        let path = format!("ppt/slides/slide{slide_num}.xml");
+        self.package
+            .get_part(&path)
+            .and_then(|b| std::str::from_utf8(b).ok().map(str::to_owned))
+    }
+
+    /// Mutate the inner content of the `<p:txBody>` of the `shape_idx`-th
+    /// shape on `slide_idx`. `rewrite` receives the existing inner XML and
+    /// returns the new inner XML; the bytes are then spliced back into the
+    /// slide XML and written to the package.
+    fn mutate_shape_txbody<F>(
+        &mut self,
+        slide_idx: usize,
+        shape_idx: usize,
+        rewrite: F,
+    ) -> Result<(), PptxError>
+    where
+        F: FnOnce(&str) -> String,
+    {
+        let slide_num = slide_idx + 1;
+        let path = format!("ppt/slides/slide{slide_num}.xml");
+        let slide_bytes = self
+            .package
+            .get_part_mut(&path)
+            .ok_or_else(|| PptxError::NotFound(messages::slide_file_not_found(&path)))?;
+        let slide_xml = std::str::from_utf8_mut(slide_bytes)
+            .map_err(|e| PptxError::XmlParse(format!("slide{slide_num}.xml: {e}")))?;
+        let (sp_start, sp_end) = super::text_editor::nth_sp_range(slide_xml, shape_idx)
+            .ok_or_else(|| PptxError::NotFound("shape".into()))?;
+        let (tb_start, tb_end) = {
+            let sp_xml = &slide_xml[sp_start..sp_end];
+            super::text_editor::txbody_range(sp_xml)
+                .ok_or_else(|| PptxError::NotFound("text frame".into()))?
+        };
+        // Adjust to absolute offsets within the slide XML.
+        let abs_tb_inner_start = sp_start + tb_start;
+        let abs_tb_inner_end = sp_start + tb_end;
+        let inner = slide_xml[abs_tb_inner_start..abs_tb_inner_end].to_owned();
+        let new_inner = rewrite(&inner);
+        // Splice the new inner back into the slide XML bytes.
+        let new_xml = format!(
+            "{}{}{}",
+            &slide_xml[..abs_tb_inner_start],
+            new_inner,
+            &slide_xml[abs_tb_inner_end..]
+        );
+        *slide_bytes = new_xml.into_bytes();
+        Ok(())
+    }
+
+    /// Get the underlying package for advanced operations
+    pub fn package(&self) -> &Package {
+        &self.package
+    }
+
+    /// Get mutable reference to package
+    pub fn package_mut(&mut self) -> &mut Package {
+        &mut self.package
+    }
+
+    // Helper methods
+
+    fn count_slides(package: &Package) -> usize {
+        package
+            .part_paths()
+            .iter()
+            .filter(|p| {
+                p.starts_with("ppt/slides/slide") && p.ends_with(".xml") && !p.contains("_rels")
+            })
+            .count()
+    }
+
+    fn presentation_has_notes(xml: &str) -> bool {
+        xml.contains("<p:notesMasterIdLst>")
+    }
+
+    fn presentation_has_handout(xml: &str) -> bool {
+        xml.contains("<p:handoutMasterIdLst>")
+    }
+
+    fn update_presentation_xml(&mut self, new_slide_count: usize) -> Result<(), PptxError> {
+        if let Some(xml) = self.package.get_part_string("ppt/presentation.xml") {
+            // Parse and update the presentation XML
+            let updated = self.add_slide_to_presentation_xml(&xml, new_slide_count)?;
+            self.package
+                .add_part("ppt/presentation.xml".to_string(), updated.into_bytes());
+        }
+        Ok(())
+    }
+
+    fn add_slide_to_presentation_xml(
+        &self,
+        xml: &str,
+        slide_num: usize,
+    ) -> Result<String, PptxError> {
+        // Find </p:sldIdLst> and insert new slide reference before it
+        let has_notes = Self::presentation_has_notes(xml);
+        let has_handout = Self::presentation_has_handout(xml);
+        let slide_id = slide_id_value(slide_num);
+        let r_id = slide_rel_id(slide_num, has_notes, has_handout);
+
+        let new_slide_ref = format!("\n<p:sldId id=\"{slide_id}\" r:id=\"rId{r_id}\"/>");
+
+        if let Some(pos) = xml.find("</p:sldIdLst>") {
+            let mut result = xml.to_string();
+            result.insert_str(pos, &new_slide_ref);
+            Ok(result)
+        } else {
+            // If no sldIdLst, return as-is (shouldn't happen for valid PPTX)
+            Ok(xml.to_string())
+        }
+    }
+
+    fn update_presentation_rels(&mut self, new_slide_count: usize) -> Result<(), PptxError> {
+        if let Some(xml) = self
+            .package
+            .get_part_string("ppt/_rels/presentation.xml.rels")
+        {
+            let updated = self.add_slide_to_presentation_rels(&xml, new_slide_count)?;
+            self.package.add_part(
+                "ppt/_rels/presentation.xml.rels".to_string(),
+                updated.into_bytes(),
+            );
+        }
+        Ok(())
+    }
+
+    fn add_slide_to_presentation_rels(
+        &self,
+        xml: &str,
+        slide_num: usize,
+    ) -> Result<String, PptxError> {
+        let has_notes = Self::presentation_has_notes(xml);
+        let has_handout = Self::presentation_has_handout(xml);
+        let r_id = slide_rel_id(slide_num, has_notes, has_handout);
+        let new_rel = format!(
+            "\n<Relationship Id=\"rId{r_id}\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/slide\" Target=\"slides/slide{slide_num}.xml\"/>"
+        );
+
+        if let Some(pos) = xml.find("</Relationships>") {
+            let mut result = xml.to_string();
+            result.insert_str(pos, &new_rel);
+            Ok(result)
+        } else {
+            Ok(xml.to_string())
+        }
+    }
+
+    fn update_content_types(&mut self, new_slide_count: usize) -> Result<(), PptxError> {
+        if let Some(xml) = self.package.get_part_string("[Content_Types].xml") {
+            let updated = self.add_slide_to_content_types(&xml, new_slide_count)?;
+            self.package
+                .add_part("[Content_Types].xml".to_string(), updated.into_bytes());
+        }
+        Ok(())
+    }
+
+    fn add_slide_to_content_types(&self, xml: &str, slide_num: usize) -> Result<String, PptxError> {
+        let new_override = format!(
+            "\n<Override PartName=\"/ppt/slides/slide{slide_num}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+        );
+
+        if let Some(pos) = xml.find("</Types>") {
+            let mut result = xml.to_string();
+            result.insert_str(pos, &new_override);
+            Ok(result)
+        } else {
+            Ok(xml.to_string())
+        }
+    }
+
+    fn renumber_slide(&mut self, old_num: usize, new_num: usize) -> Result<(), PptxError> {
+        // Move slide file
+        let old_path = format!("ppt/slides/slide{old_num}.xml");
+        let new_path = format!("ppt/slides/slide{new_num}.xml");
+
+        if let Some(content) = self.package.remove_part(&old_path) {
+            self.package.add_part(new_path, content);
+        }
+
+        // Move slide rels
+        let old_rels = format!("ppt/slides/_rels/slide{old_num}.xml.rels");
+        let new_rels = format!("ppt/slides/_rels/slide{new_num}.xml.rels");
+
+        if let Some(content) = self.package.remove_part(&old_rels) {
+            self.package.add_part(new_rels, content);
+        }
+
+        Ok(())
+    }
+
+    fn rebuild_presentation_xml(&mut self) -> Result<(), PptxError> {
+        let existing = self
+            .package
+            .get_part_string("ppt/presentation.xml")
+            .unwrap_or_default();
+        let has_notes = Self::presentation_has_notes(&existing);
+        let has_handout = Self::presentation_has_handout(&existing);
+
+        let mut slide_refs = String::new();
+        for i in 1..=self.slide_count {
+            let slide_id = slide_id_value(i);
+            let r_id = slide_rel_id(i, has_notes, has_handout);
+            slide_refs.push_str(&format!(
+                "\n<p:sldId id=\"{slide_id}\" r:id=\"rId{r_id}\"/>"
+            ));
+        }
+
+        let mut xml = String::from(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" saveSubsetFonts="1" autoCompressPictures="0">
+<p:sldMasterIdLst>
+<p:sldMasterId id="2147483648" r:id="rId1"/>
+</p:sldMasterIdLst>"#,
+        );
+
+        if has_notes {
+            xml.push_str(
+                r#"
+<p:notesMasterIdLst>
+<p:notesMasterId id="2147483650" r:id="rId6"/>
+</p:notesMasterIdLst>"#,
+            );
+        }
+
+        if has_handout {
+            let handout_rid = if has_notes { 7 } else { 6 };
+            xml.push_str(&format!(
+                r#"
+<p:handoutMasterIdLst>
+<p:handoutMasterId id="2147483651" r:id="rId{handout_rid}"/>
+</p:handoutMasterIdLst>"#
+            ));
+        }
+
+        xml.push_str(&format!(
+            r#"
+<p:sldIdLst>{slide_refs}
+</p:sldIdLst>
+<p:sldSz cx="9144000" cy="6858000" type="screen4x3"/>
+<p:notesSz cx="6858000" cy="9144000"/>
+</p:presentation>"#
+        ));
+
+        self.package
+            .add_part("ppt/presentation.xml".to_string(), xml.into_bytes());
+        Ok(())
+    }
+
+    fn rebuild_presentation_rels(&mut self) -> Result<(), PptxError> {
+        let existing = self
+            .package
+            .get_part_string("ppt/presentation.xml")
+            .unwrap_or_default();
+        let has_notes = Self::presentation_has_notes(&existing);
+        let has_handout = Self::presentation_has_handout(&existing);
+
+        let xml = create_presentation_rels_xml_full(self.slide_count, has_notes, has_handout);
+
+        self.package.add_part(
+            "ppt/_rels/presentation.xml.rels".to_string(),
+            xml.into_bytes(),
+        );
+        Ok(())
+    }
+
+    fn rebuild_content_types(&mut self) -> Result<(), PptxError> {
+        let mut slide_overrides = String::new();
+        for i in 1..=self.slide_count {
+            slide_overrides.push_str(&format!(
+                "\n<Override PartName=\"/ppt/slides/slide{i}.xml\" ContentType=\"application/vnd.openxmlformats-officedocument.presentationml.slide+xml\"/>"
+            ));
+        }
+
+        let xml = format!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+<Default Extension="xml" ContentType="application/xml"/>
+<Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>{slide_overrides}
+<Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/>
+<Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/>
+<Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>
+<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>"#
+        );
+
+        self.package
+            .add_part("[Content_Types].xml".to_string(), xml.into_bytes());
+        Ok(())
+    }
+}
+
+impl Default for PresentationEditor {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::generator::create_pptx_with_content;
+    use crate::oxml::PresentationReader;
+    use std::fs;
+
+    #[test]
+    fn test_open_and_add_slide() {
+        // Create initial presentation
+        let slides = vec![SlideContent::new("Original Slide 1").add_bullet("Original content")];
+        let pptx_data = create_pptx_with_content("Test", slides).unwrap();
+        fs::write("test_edit.pptx", &pptx_data).unwrap();
+
+        // Open and add a slide
+        let mut editor = PresentationEditor::open("test_edit.pptx").unwrap();
+        assert_eq!(editor.slide_count(), 1);
+
+        let new_slide = SlideContent::new("New Slide").add_bullet("Added via editor");
+        editor.add_slide(new_slide).unwrap();
+
+        assert_eq!(editor.slide_count(), 2);
+
+        // Save and verify
+        editor.save("test_edit_modified.pptx").unwrap();
+
+        let reader = PresentationReader::open("test_edit_modified.pptx").unwrap();
+        assert_eq!(reader.slide_count(), 2);
+
+        // Cleanup
+        fs::remove_file("test_edit.pptx").ok();
+        fs::remove_file("test_edit_modified.pptx").ok();
+    }
+
+    #[test]
+    fn test_update_slide() {
+        let slides = vec![SlideContent::new("Original Title").add_bullet("Original bullet")];
+        let pptx_data = create_pptx_with_content("Test", slides).unwrap();
+        fs::write("test_update.pptx", &pptx_data).unwrap();
+
+        let mut editor = PresentationEditor::open("test_update.pptx").unwrap();
+
+        let updated = SlideContent::new("Updated Title").add_bullet("Updated bullet");
+        editor.update_slide(0, updated).unwrap();
+
+        editor.save("test_update_modified.pptx").unwrap();
+
+        let reader = PresentationReader::open("test_update_modified.pptx").unwrap();
+        let slide = reader.get_slide(0).unwrap();
+        assert_eq!(slide.title, Some("Updated Title".to_string()));
+
+        fs::remove_file("test_update.pptx").ok();
+        fs::remove_file("test_update_modified.pptx").ok();
+    }
+
+    #[test]
+    fn test_duplicate_slide() {
+        let slides = vec![
+            SlideContent::new("Slide 1").add_bullet("one"),
+            SlideContent::new("Slide 2").add_bullet("two"),
+        ];
+        let pptx_data = create_pptx_with_content("Test", slides).unwrap();
+        fs::write("test_duplicate.pptx", &pptx_data).unwrap();
+
+        let mut editor = PresentationEditor::open("test_duplicate.pptx").unwrap();
+        let new_index = editor.duplicate_slide(0).unwrap();
+        assert_eq!(new_index, 1);
+        assert_eq!(editor.slide_count(), 3);
+
+        editor.save("test_duplicate_modified.pptx").unwrap();
+        let reader = PresentationReader::open("test_duplicate_modified.pptx").unwrap();
+        assert_eq!(reader.slide_count(), 3);
+
+        fs::remove_file("test_duplicate.pptx").ok();
+        fs::remove_file("test_duplicate_modified.pptx").ok();
+    }
+
+    #[test]
+    fn test_insert_slide() {
+        let slides = vec![
+            SlideContent::new("Slide 1").add_bullet("one"),
+            SlideContent::new("Slide 2").add_bullet("two"),
+        ];
+        let pptx_data = create_pptx_with_content("Test", slides).unwrap();
+        fs::write("test_insert.pptx", &pptx_data).unwrap();
+
+        let mut editor = PresentationEditor::open("test_insert.pptx").unwrap();
+        let inserted = editor
+            .insert_slide(1, SlideContent::new("Inserted").add_bullet("new"))
+            .unwrap();
+        assert_eq!(inserted, 1);
+        assert_eq!(editor.slide_count(), 3);
+
+        editor.save("test_insert_modified.pptx").unwrap();
+        let reader = PresentationReader::open("test_insert_modified.pptx").unwrap();
+        assert_eq!(reader.slide_count(), 3);
+        let titles: Vec<_> = (0..reader.slide_count())
+            .map(|i| reader.get_slide(i).unwrap().title.unwrap_or_default())
+            .collect();
+        assert_eq!(titles, vec!["Slide 1", "Inserted", "Slide 2"]);
+
+        fs::remove_file("test_insert.pptx").ok();
+        fs::remove_file("test_insert_modified.pptx").ok();
+    }
+
+    #[test]
+    fn test_reorder_slide() {
+        let slides = vec![
+            SlideContent::new("Slide A").add_bullet("a"),
+            SlideContent::new("Slide B").add_bullet("b"),
+            SlideContent::new("Slide C").add_bullet("c"),
+        ];
+        let pptx_data = create_pptx_with_content("Test", slides).unwrap();
+        fs::write("test_reorder.pptx", &pptx_data).unwrap();
+
+        let mut editor = PresentationEditor::open("test_reorder.pptx").unwrap();
+        editor.reorder_slide(2, 0).unwrap();
+        assert_eq!(editor.slide_count(), 3);
+
+        editor.save("test_reorder_modified.pptx").unwrap();
+        let reader = PresentationReader::open("test_reorder_modified.pptx").unwrap();
+        let titles: Vec<_> = (0..reader.slide_count())
+            .map(|i| reader.get_slide(i).unwrap().title.unwrap_or_default())
+            .collect();
+        assert_eq!(titles, vec!["Slide C", "Slide A", "Slide B"]);
+
+        fs::remove_file("test_reorder.pptx").ok();
+        fs::remove_file("test_reorder_modified.pptx").ok();
+    }
+}

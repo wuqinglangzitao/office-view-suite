@@ -1,0 +1,85 @@
+[package]
+name = "rwml"
+version = "0.1.4"
+edition = "2021"
+# Core deps (`cfb`→`uuid`, `zip`→`indexmap`/`hashbrown`) require Rust 1.85; the
+# `render` feature (currently `krilla`) raises the floor to 1.92.
+rust-version = "1.85"
+license = "MIT"
+description = "Native Rust toolkit for Microsoft Word — read, write, edit, and render legacy .doc (Word 97-2003, [MS-DOC]) and modern .docx (OOXML): one document model, package-preserving edits, field evaluation, Markdown/HTML export, PDF preview"
+repository = "https://github.com/HyunjoJung/rwml"
+homepage = "https://github.com/HyunjoJung/rwml"
+documentation = "https://docs.rs/rwml"
+readme = "README.md"
+authors = ["Hyunjo Jung <mrjung0987@seoultech.ac.kr>"]
+keywords = ["doc", "docx", "msword", "ole2", "parser"]
+categories = ["parser-implementations", "text-processing"]
+exclude = [".github/", "rwml-fonts/"]
+
+# Standalone, dependency-light, no workspace inheritance — this crate is meant
+# to be liftable into its own repository / crates.io as-is.
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+cfb = "0.10"
+encoding_rs = "0.8"
+thiserror = "2.0"
+# Modern .docx (OOXML WordprocessingML) support — on by default; disable for the
+# dependency-light legacy-.doc-only build (`default-features = false`). Mirrors
+# the sibling `rxls` crate's .xlsx feature setup.
+zip = { version = "2.2", default-features = false, features = ["deflate"], optional = true }
+quick-xml = { version = "0.41", optional = true }
+flate2 = { version = "1.0", optional = true }
+# Native typesetting renderer (DocModel → PDF): parley for layout/shaping/CJK
+# line-breaking, krilla for PDF emit with subsetted fonts + selectable text.
+# Heavy + raises the MSRV to 1.92 (currently krilla), so it is strictly opt-in.
+krilla = { version = "0.8", optional = true }
+parley = { version = "0.11", optional = true }
+rwml-fonts = { version = "0.1.4", path = "rwml-fonts", optional = true }
+
+[features]
+default = ["docx"]
+docx = ["dep:zip", "dep:quick-xml", "dep:flate2"]
+render = ["dep:krilla", "dep:parley"]
+bundled-fonts = ["render", "dep:rwml-fonts"]
+
+[dev-dependencies]
+rwml-fonts = { version = "0.1.4", path = "rwml-fonts" }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+
+[[example]]
+name = "extract"
+path = "examples/extract.rs"
+
+[[example]]
+name = "roundtrip"
+path = "examples/roundtrip.rs"
+required-features = ["docx"]
+
+[[example]]
+name = "to_docx"
+path = "examples/to_docx.rs"
+required-features = ["docx"]
+
+[[example]]
+name = "validate_edit"
+path = "examples/validate_edit.rs"
+required-features = ["docx"]
+
+[[bin]]
+name = "rwml"
+path = "src/bin/rwml.rs"
+required-features = ["docx"]
+
+[[example]]
+name = "to_pdf"
+path = "examples/to_pdf.rs"
+required-features = ["render"]
+
+[[example]]
+name = "report"
+path = "examples/report.rs"
+required-features = ["docx"]

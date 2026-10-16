@@ -1,0 +1,4 @@
+# path	paragraphs	tables	figures	text_chars	warnings
+sample/floating_text_bearing.doc	1	0	0	49	PackageReadOnly
+sample/floating_wrap_policy.doc	1	0	0	25	PackageReadOnly
+sample/nested_tables.doc	2	1	0	30	PackageReadOnly

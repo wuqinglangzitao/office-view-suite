@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>excel-view · umya-spreadsheet(Rust→WASM)</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #f6f8fa; color: #1f2328; font: 14px/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+      .hidden { display: none !important; }
+      .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+        background: rgba(255,255,255,.92); backdrop-filter: blur(8px); border-bottom: 1px solid #e4e8ec; }
+      .brand { font-weight: 700; }
+      .brand .sub { font-weight: 400; color: #8b949e; font-size: 12px; margin-left: 8px; }
+      #meta { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+      .chip { background: #eef1f4; border: 1px solid #e1e6ea; color: #57606a; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+      main { max-width: 1080px; margin: 0 auto; padding: 24px 16px; }
+      .drop { background: #fff; border: 2px dashed #d0d7de; border-radius: 14px; padding: 40px 20px; text-align: center; cursor: pointer; transition: .15s; }
+      .drop:hover, .drop.drag { border-color: #0969da; background: #f3f8ff; }
+      .drop-title { font-size: 16px; font-weight: 600; margin-top: 6px; }
+      .samples { margin: 14px 0; text-align: center; }
+      .sample-btn { border: 1px solid #d0d7de; background: #fff; border-radius: 999px; padding: 4px 14px; margin: 3px 4px; font-size: 13px; cursor: pointer; }
+      .sample-btn:hover { border-color: #0969da; color: #0969da; }
+      #status { text-align: center; color: #57606a; padding: 32px 0; }
+      .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #d8dee4; border-top-color: #0969da; border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 10px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #error { background: #fff5f5; border: 1px solid #ffcecb; border-radius: 10px; padding: 16px 20px; color: #cf222e; }
+      #viewer { margin-top: 8px; }
+      footer { text-align: center; color: #8b949e; font-size: 12px; padding: 24px 0 40px; }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">excel-view<span class="sub">umya-spreadsheet(Rust→WASM)· 完整网格 + 合并 span + 列宽行高 + 数字格式渲染</span></div>
+      <div id="meta" class="hidden"></div>
+    </header>
+    <main>
+      <section id="intake">
+        <div id="drop" class="drop">
+          <div style="font-size:32px">📊</div>
+          <div class="drop-title">拖入 Excel 文件,或点击选择</div>
+          <div style="margin-top:6px;color:#8b949e;font-size:12px">XLSX / XLSM · 97-2003 二进制请走 anydoc 兜底层</div>
+        </div>
+        <input id="file" type="file" hidden accept=".xlsx,.xlsm" />
+      </section>
+      <section class="samples"><span style="color:#8b949e;font-size:12px">或试用样例:</span><span id="samples-bar"></span></section>
+      <section id="status" class="hidden"><div class="spinner"></div><div id="status-text"></div></section>
+      <section id="error" class="hidden"><div id="error-text"></div></section>
+      <article id="viewer" class="hidden"></article>
+    </main>
+    <footer>解析:umya-spreadsheet 3.1.1(MIT)· 样式:字体/字号/颜色/底纹/对齐/边框/合并/列宽行高/数字格式 · 文件不出浏览器</footer>
+    <script type="module" src="/src/app/main.ts"></script>
+  </body>
+</html>

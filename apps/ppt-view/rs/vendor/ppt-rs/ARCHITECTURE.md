@@ -1,0 +1,858 @@
+# PPTX Library Architecture
+
+## Overview
+
+The PPTX library is organized into several layers that handle different aspects of PowerPoint file manipulation:
+
+## Current Focus (v0.2.x)
+
+The project has completed several major phases:
+
+1. **API Simplification** (v0.2.11) — Helper pattern for common operations
+   - Color helpers: `red()`, `material_blue()`, `corporate_blue()`
+   - Table helpers: `simple_table()`, `table_from_data()`, `QuickTable`
+   - Extension traits: `.fill()`, `.stroke()`, `.text()` on `Shape`
+
+2. **Export & Compression** (v0.2.12) — Full round-trip capabilities
+   - Markdown export with `MarkdownOptions`
+   - Image export (PNG/JPEG via pure-Rust PDF render + `pdftoppm`)
+   - PPTX compression with `CompressionOptions`
+
+3. **MCP Server** (v0.2.13) — AI assistant integration
+   - `ppt_mcp` binary with 8 tools via Model Context Protocol
+   - Create, read, export, validate, and merge presentations
+
+4. **Enhanced HTML & Markdown** (v0.2.14) — Real-world content support
+   - Enhanced Markdown: Real images, task lists, strikethrough formatting
+   - Enhanced HTML: Extended CSS, real image downloading, hyperlink handling
+   - Enhanced HTML Export: Interactive navigation, speaker notes, keyboard controls
+   - HTML Parser Documentation: Comprehensive parser comparison guide
+
+5. **PowerPoint Zero-Repair Compatibility Gate** (v0.2.19) — Generated decks open without repair
+   - `core::package_validation` — structured `validate_package_bytes()` → `PackageValidationReport` with `ValidationCategory` / `ValidationSeverity`; debug builds self-check every generated deck
+   - Multiple slide layouts — 7 layouts on slide master 1 (`layout_parts.rs`), per-slide `SlideContent::with_layout()`
+   - Template-based generation — `PptxTemplate` / `create_pptx_with_template` / `PresentationSettings::template` / CLI `--template`
+   - Chart Excel workbook embedding — `ppt/embeddings/Microsoft_Excel_SheetN.xlsx` so charts are editable
+   - Handout master packaging, slide master `p:txStyles`, notes master theme parity, presentation rel ordering
+
+6. **Editor, Validation CLI & Wiring** (v0.2.20) — Programmatic editing and agent loop
+   - `PresentationEditor` (`oxml/editor.rs`) — duplicate, reorder, insert slide at index, batch replace
+   - Core validation integrated into `pptcli validate`; rmcp upgraded
+   - Embedded fonts + ink annotations wired into the generator; digital signatures packaged
+   - Review comments packaged (`ppt/comments/commentN.xml`, `ppt/commentAuthors.xml`) from `SlideContent::add_comment` + presentation comment authors
+
+7. **Lean Audit & Structured Validate** (v0.2.21) — Quality pass
+   - Dead code removal, `escape_xml` hot-path, `XmlWriter` cleanup
+   - `pptcli validate` structured human report + `--json`; warnings cleared
+
+8. **PDF Native & Web2MD Bridge** (v0.2.23–v0.2.24) — Platform reach
+   - Pure-Rust PDF export via `pdfrs` (`pdf-native` feature) — no LibreOffice dependency
+   - `web2md` bridge — HTML→Markdown→Slides pipeline with `--web2md` CLI flag
+
+Future work focuses on performance optimization and competitive intelligence seeding. WASM is out of scope. REST/HTTP API, semantic diff, batch/pipeline API, Criterion benchmarks, CLI/MCP export parity, comments round-trip, video/audio embedding, and section-aware export shipped in v0.2.27–v0.2.34.
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Prelude (prelude.rs)                     │
+│     pptx!(), shape!(), shapes::, colors::, inches(), cm()   │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    Public API (lib.rs)                      │
+│     Presentation, SlideContent, Table, Chart, Image         │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Core Traits (core/)                            │
+│         ToXml, Positioned, ElementSized                        │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Elements Layer (elements/)                     │
+│         Color, Position, Size, Transform                    │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Generator Layer (generator/)                   │
+│    SlideContent, Tables, Charts, Images, XML generation     │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│              Parts Layer (parts/)                           │
+│         SlidePart, ImagePart, ChartPart, etc.               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│              OPC Layer (opc/)                               │
+│         ZIP file handling and Package management            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Design Principles
+
+1. **DRY**: Single source of truth — e.g. `escape_xml` lives only in `core::xml_utils`, image format helpers in `generator::images`
+2. **SoC**: Clear boundaries between layers — XML generation in `generator/`, parsing in `oxml/`, packaging in `opc/`
+3. **KISS**: Minimal dependencies (17 direct, all optional where it makes sense), lightweight header parsing instead of heavy crates, no unnecessary abstractions
+4. **Trait-Facing**: Core traits (`ToXml`, `Positioned`, `ElementSized`) implemented on key types for generic dispatch, testability, and polymorphism. Types keep inherent methods for direct callers; trait impls delegate via `Type::method(self)`.
+5. **Builder Pattern**: Fluent APIs for constructing complex objects
+6. **Flexible Dimensions**: `Dimension` enum supports EMU, inches, cm, points, and ratio (0.0–1.0 of slide). Shapes and images accept `Dimension` via `.at()`, `.with_dimensions()`, and `from_dimensions()` for mixed-unit positioning.
+7. **Helper Pattern**: Extension traits and factory functions for common operations (v0.2.11+)
+
+### Trait Coverage
+
+| Trait | Implementors | Purpose |
+|-------|-------------|---------|
+| `ToXml` | `Run`, `Paragraph`, `TextFrame`, `BulletStyle`, `TransitionType`, `Relationship`, `Relationships`, `TableCellPart`, `TableRowPart`, `CellBorders`, `RgbColor`, `Position`, `Size`, `Color` | XML serialization |
+| `Positioned` | `Shape`, `Image` | Position interface (`.x()`, `.y()`, `.set_position()`) |
+| `ElementSized` | `Shape`, `Image` | Size interface (`.width()`, `.height()`) |
+| `ShapeExt` | `Shape` | Extension methods (`.fill()`, `.stroke()`, `.text()`) |
+
+### Helper Pattern (v0.2.11+)
+
+The helper pattern provides convenient utilities without runtime overhead:
+
+**Color Helpers** (`helpers::colors`):
+```rust
+// Factory functions for common colors
+let c1 = red();           // Same as RgbColor::new(255, 0, 0)
+let c2 = material_blue(); // Predefined Material Design colors
+let c3 = ColorValue::from_hex("#FF8040")?; // Hex parsing
+
+// Color operations
+let lighter = c1.lighter(0.2);  // 20% lighter
+let mixed = c1.mix(&blue(), 0.5); // 50% blend
+```
+
+**Table Helpers** (`helpers::tables`):
+```rust
+// Quick table creation
+let t1 = simple_table(3, 2);  // 3 rows, 2 columns
+let t2 = table_from_data(&data, vec![1000000, 2000000]);
+let t3 = table_with_header(&["Name", "Value"], rows);
+
+// Builder pattern
+let t4 = QuickTable::new(vec![1000000, 2000000])
+    .header_row(vec!["A", "B"])
+    .data_row(vec!["1", "2"])
+    .build();
+```
+
+**Extension Traits** (`helpers::ext`):
+```rust
+// Instead of:
+shape.with_fill(ShapeFill::from_color(red()))
+     .with_line(ShapeLine::new(black(), 12700))
+     .with_text("Hello");
+
+// Write:
+shape.fill(red()).stroke(black(), 12700).text("Hello");
+```
+
+## Module Descriptions
+
+### Prelude Layer (`prelude.rs`)
+- **Purpose**: Simplified API for common use cases
+- **Key Features**:
+  - `pptx!()` macro for quick presentation creation
+  - `shape!()` macro for quick shape creation
+  - `QuickPptx` builder with fluent API
+  - Unit conversion helpers: `inches()`, `cm()`, `pt()`
+  - Shape builders: `shapes::rect()`, `shapes::circle()`, `shapes::text_box()`
+  - Color constants: `colors::RED`, `colors::BLUE`, `colors::CORPORATE_BLUE`
+- **Usage**: `use ppt_rs::prelude::*;`
+
+### API Layer (`api.rs`)
+- **Purpose**: High-level presentation builder
+- **Key Types**:
+  - `Presentation` - Create, build, save, import, and export presentations
+  - `Presentation::new()` / `Presentation::with_title()` - Create new presentations
+  - `Presentation::from_path()` - Import existing PPTX files
+  - `.save()`, `.build()` - PPTX output
+  - `.save_as_html()`, `.save_as_markdown()` - Document export
+  - `.save_as_images()`, `.save_thumbnail()` - Image export
+  - `.compress()`, `.analyze_size()` - Optimization
+
+### Package Layer (`opc/`)
+- **Purpose**: Handle .pptx files as ZIP containers
+- **Responsibilities**:
+  - Open/save ZIP files via `Package` struct
+  - Stream writing to any `Write + Seek` target
+  - Content type declarations
+  - Relationship management
+- **Key Types**: `Package`
+
+### Parts Layer (`parts/`)
+- **Purpose**: Represent individual package components
+- **Part Types**:
+  - `PresentationPart` - Main presentation document
+  - `SlidePart` - Individual slides
+  - `SlideLayoutPart` - Slide layouts
+  - `SlideMasterPart` - Slide masters
+  - `NotesSlidePart` - Notes pages
+  - `ImagePart` - Embedded images
+  - `MediaPart` - Embedded media
+  - `ChartPart` - Embedded charts
+  - `CorePropertiesPart` - Document properties
+
+### OXML Layer (`oxml/`)
+- **Purpose**: Parse and manipulate Office XML elements
+- **Key Types**:
+  - `PresentationReader` / `PresentationInfo` - Read PPTX metadata
+  - `PresentationEditor` - Edit existing PPTX files
+  - `SlideParser` / `ParsedSlide` - Parse slide content
+  - `PptxRepair` / `RepairIssue` / `RepairResult` - Validate and repair PPTX files
+  - `XmlElement` / `XmlParser` / `Namespace` - XML parsing utilities
+
+### Export Layer (`export/`)
+- **Purpose**: Export presentations to external formats
+- **Modules**:
+  - `html` - HTML export with CSS styling
+  - `md` - Markdown export with GFM tables and frontmatter
+  - `image_export` - Image export (PNG, JPEG) via pure-Rust PDF render + `pdftoppm` rasterization
+  - `slide_render` - Pure-Rust slide-to-PDF vector rendering via `pdfrs`
+- `pdf_export` - Pure-Rust PDF export via `pdfrs` (`pdf-native` feature, no LibreOffice)
+- **Key Types**:
+  - `MarkdownOptions` - Configure markdown output
+  - `ImageExportOptions` / `ImageFormat` - Configure image export
+  - `PdfExportOptions` / `PdfOrientation` - Configure native PDF export
+  - `export_to_markdown()`, `export_to_images()`, `export_to_pdf()` - Direct export functions
+- **CLI surface**: `pptcli pdf2ppt` (`Pdf2Ppt` variant in `src/cli/parser.rs`) renders a PDF to slides and emits a deck — uses the same `pdfrs` renderer as `export_to_pdf`.
+
+### Import Layer (`import/`)
+- **Purpose**: Import from external formats
+- **Modules**:
+  - `mod` - PPTX import functionality
+  - `html` - HTML-to-PPTX converter (`html2ppt`)
+- **Key Types**:
+  - `import_pptx()` - Import PPTX to Presentation
+  - `parse_html()` - Quick HTML string to slides conversion
+  - `Html2Ppt` / `HtmlParseOptions` - Struct-based HTML converter with options
+  - See [SPEC.md](SPEC.md) for full HTML element mapping
+
+### OPC Layer (`opc/`)
+- **Purpose**: Handle Open Packaging Convention (ZIP) specifics
+- **Key Types**: `Package` for ZIP file operations
+- **Compression** (`opc/compress.rs`):
+  - `compress_pptx()` - Optimize PPTX file size
+  - `CompressionOptions` / `CompressionLevel` - Configure optimization
+  - `analyze_pptx()` - File size analysis
+
+### Utility Layers
+
+#### Helpers (`helpers/`)
+- **Purpose**: Simplified helpers for common operations
+- **Modules**:
+  - `colors.rs` - 40+ color aliases (`red()`, `blue()`, `material_blue()`, etc.), `ColorValue` with `.lighter()`, `.darker()`, `.opacity()`, `.mix()`, `.grayscale()`, `.invert()`
+  - `tables.rs` - `simple_table()`, `table_from_data()`, `table_with_header()`, `QuickTable` builder, cell helpers
+  - `shapes.rs` - `rect()`, `circle()`, `ellipse()`, `triangle()`, `diamond()` with inch-based dimensions
+  - `ext.rs` - `ShapeExt` trait: `.fill()`, `.stroke()`, `.text()` extension methods
+
+#### Core Types (`core/`)
+- **Purpose**: Foundational traits and types
+- **Sub-modules**:
+  - `traits.rs` — `ToXml`, `Positioned`, `ElementSized`
+  - `dimension.rs` — `Dimension` enum (EMU, Inches, Cm, Pt, Ratio, Percent), `FlexPosition`, `FlexSize`
+  - `xml_utils.rs` — shared XML utilities (`escape_xml`, `XmlWriter`, `append_usize`, `append_i32`)
+  - `validation.rs` — shared validators, `ValidationIssue`, `REQUIRED_PARTS_*` constants
+  - `placement.rs` — `ElementPlacement` (consolidated builder placement)
+  - `package_validation/` — structural PPTX validation: `validate_package`, `validate_package_bytes`, `PackageValidationReport`, `PackageValidationIssue`, `ValidationCategory`, `ValidationSeverity`, `REQUIRED_PACKAGE_PARTS` (sub-modules: `rules`, `rels`, `context`, `report`)
+  - `powerpoint_compat.rs` — legacy `validate_powerpoint_structure` / `CompatReport` wrapper over package validation
+- **Key Types**:
+  - `ToXml` trait - XML serialization
+  - `Positioned` trait - Position interface (`.x()`, `.y()`, `.set_position()`)
+  - `ElementSized` trait (re-exported as `Sized`) - Size interface (`.width()`, `.height()`)
+  - `Dimension` enum - Flexible dimensions: EMU, Inches, Cm, Pt, Ratio, Percent
+  - `FlexPosition` / `FlexSize` - Mixed-unit positioning
+
+#### Element Types (`elements/`)
+- **Purpose**: Unified element types used across the library
+- **Key Types**: `Color`, `RgbColor`, `SchemeColor`, `Position`, `Size`, `Transform`
+
+#### Exceptions (`exc.rs`)
+- **Purpose**: Error types
+- **Key Types**:
+  - `PptxError` - Main error enum (Generic, Io, Zip, XmlParse, InvalidValue, NotFound, etc.)
+  - `Result<T>` - Result type alias
+
+## Data Flow
+
+## Testing Architecture
+
+The project employs a layered testing strategy with 1310 tests:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                    Integration Tests                        │
+│         (tests/ directory — full workflows)                 │
+│              513 tests, end-to-end validation               │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    Unit Tests                               │
+│         (inline in src/ modules — per-component)            │
+│              772 tests, fast feedback                       │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    Compatibility Tests                      │
+│         (tests/compatibility_test.rs)                       │
+│              6 tests, PowerPoint/LibreOffice/Google         │
+└─────────────────────────────────────────────────────────────┘
+                            ↓
+┌─────────────────────────────────────────────────────────────┐
+│                    Documentation Tests                      │
+│         (doctest — examples in doc comments)                │
+│              50+ tests, API examples validated              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Quality Gates
+
+- **100% test pass rate required** — no flaky tests
+- **Zero compiler warnings** — enforced in CI
+- **Clippy clean** — all lints addressed
+- **Generated PPTX validation** — `PptxValidator` checks structure
+
+### Running Tests
+
+```bash
+cargo test              # All tests
+cargo test --lib        # Unit tests only
+cargo test integration  # Integration tests
+cargo test --doc        # Doc tests
+cargo clippy            # Lint check
+```
+
+## Performance Characteristics
+
+### Generation Speed
+- **Target**: 1000+ slides/second for simple slides
+- **Measured**: ~1500 slides/sec (empty slides, release build)
+- **With content**: ~500-800 slides/sec (shapes, text)
+- **With images**: ~100-200 slides/sec (depends on image size)
+
+### Memory Usage
+- **Base overhead**: ~2 MB (library + empty presentation)
+- **Per slide**: ~10-50 KB (text + shapes)
+- **With images**: Image size + ~5 KB metadata
+- **100 slides**: ~5-10 MB
+- **1000+ slides**: Use streaming/lazy loading (~50 MB)
+
+### File Size Overhead
+- **Base PPTX**: ~17 KB (empty presentation with required parts)
+- **Per slide**: ~1-3 KB (XML overhead)
+- **Images**: Original size + minimal overhead
+
+### Optimization Strategies
+
+1. **Streaming ZIP** (v0.2.7+) — Write directly to `Write + Seek` without buffering entire file in memory
+2. **Lazy Loading** — Generate slides on-demand for very large presentations
+3. **Image reuse** — Same image referenced multiple times uses single copy
+4. **Compression** — All XML compressed with DEFLATE in ZIP
+
+### Opening a Presentation
+
+```
+User calls Presentation::from_path(path)
+    ↓
+Package reads ZIP via opc::Package
+    ↓
+OPC layer extracts relationships
+    ↓
+Parts are loaded and parsed
+    ↓
+OXML elements are created
+    ↓
+Presentation object returned to user
+```
+
+### Creating a Presentation
+
+```
+User calls Presentation::new() or Presentation::with_title()
+    ↓
+Slides are added via .add_slide() or .add_presentation()
+    ↓
+User calls .build() or .save(path)
+    ↓
+Generator creates package structure
+    ↓
+XML is generated for each part
+    ↓
+Parts are written to ZIP
+    ↓
+File is saved
+```
+
+### Saving a Presentation
+
+```
+User calls presentation.save(path)
+    ↓
+OXML elements are serialized to XML
+    ↓
+Parts are written to ZIP (or streamed via Write + Seek)
+    ↓
+Relationships are written
+    ↓
+ZIP file is saved
+```
+
+## Key Design Patterns
+
+### 1. Builder Pattern
+- `SlideContent` uses builder methods (`.add_bullet()`, `.table()`, `.add_shape()`)
+- `TableBuilder`, `ChartBuilder`, `ImageBuilder` provide fluent APIs
+- `QuickPptx` in prelude for quick presentation creation
+
+### 2. Factory Functions
+- `create_pptx()`, `create_pptx_with_content()` create PPTX files
+- `rect()`, `circle()`, `triangle()` in helpers create shapes with inch-based dimensions
+- `simple_table()`, `QuickTable::new()` create tables
+
+### 3. Trait-Based Dispatch
+- `ToXml` for XML serialization across types
+- `Positioned` and `ElementSized` for generic positioning/size operations
+- `LazySlideSource` trait for on-demand slide generation
+
+### 4. Streaming / Lazy Generation
+- `create_pptx_to_writer()` streams directly to `Write + Seek`
+- `create_pptx_lazy_to_writer()` generates slides on demand
+- Memory-efficient for large presentations
+
+## File Organization
+
+```
+src/
+├── lib.rs                 # Library root, re-exports public API
+├── prelude.rs             # Simplified API: macros, unit helpers, shapes, colors, themes
+├── api.rs                 # High-level Presentation builder (new, save, import, export)
+├── templates.rs           # Pre-built templates (business_proposal, status_report, etc.)
+├── exc.rs                 # Error types (PptxError, Result)
+├── core/                  # Core traits and types
+│   ├── mod.rs
+│   ├── dimension.rs       # Dimension enum (EMU, Inches, Cm, Pt, Ratio)
+│   ├── traits.rs          # ToXml, Positioned, ElementSized traits
+│   ├── xml_utils.rs       # Shared XML utilities (escape_xml, XmlWriter)
+│   ├── validation.rs      # Shared validators, ValidationIssue, REQUIRED_PARTS_*
+│   ├── placement.rs       # ElementPlacement (consolidated builder placement)
+│   ├── powerpoint_compat.rs # Legacy CompatReport / validate_powerpoint_structure
+│   └── package_validation/  # Structural PPTX validation engine
+│       ├── mod.rs
+│       ├── rules.rs       # validate_package / validate_package_bytes
+│       ├── rels.rs        # Relationship checks
+│       ├── context.rs     # Validation context
+│       └── report.rs      # PackageValidationReport / Issue / Severity / Category
+├── elements/              # Unified element types
+│   ├── mod.rs
+│   ├── color.rs           # Color, RgbColor, SchemeColor
+│   ├── position.rs        # Position, Size, Transform
+│   └── ...
+├── generator/             # PPTX generation (ZIP + XML)
+│   ├── mod.rs
+│   ├── builder.rs         # create_pptx(), create_pptx_with_content(), create_pptx_with_template()
+│   ├── slide_xml/         # Modular slide XML generation
+│   ├── slide_content/     # SlideContent, bullets, transitions, layouts, settings
+│   ├── layout_parts.rs    # slideLayoutN.xml + master footer placeholders (v0.2.19)
+│   ├── template.rs        # PptxTemplate — load masters/theme/layouts from a deck (v0.2.19)
+│   ├── package_cache.rs   # Cached package bytes / diff helpers (v0.2.19)
+│   ├── media_registry.rs  # De-duplicate media parts across slides (v0.2.19)
+│   ├── charts/            # Chart types, XML, Excel workbook embedding (v0.2.19)
+│   ├── table/             # Table builder and XML
+│   ├── shapes.rs          # Shape types
+│   ├── shapes_xml.rs      # Shape XML generation
+│   ├── images.rs          # Image types, effects, ImageBuilder
+│   ├── images_xml.rs      # Image XML generation
+│   ├── image_effects.rs   # Modular image effects XML
+│   ├── connectors.rs      # Connector types
+│   ├── hyperlinks.rs      # Hyperlink support
+│   ├── gradients.rs       # Gradient fills
+│   ├── media.rs           # Video/audio embedding
+│   ├── memory_profile.rs  # Generation metrics + output-capacity estimation
+│   ├── package_xml.rs     # Package-level XML (content types, rels, presProps, viewProps, tableStyles, handout master)
+│   ├── presentation_theme.rs # Customizable theme colors/fonts
+│   ├── theme_xml.rs       # Theme XML generation
+│   ├── props_xml.rs       # Properties XML
+│   └── notes_xml.rs       # Notes XML
+├── parts/                 # Package parts (SlidePart, ImagePart, etc.)
+├── opc/                   # Open Packaging Convention (ZIP handling)
+├── oxml/                  # Office XML parsing (reader, editor, parser, repair, comments import)
+├── helpers/               # Simplified helpers
+│   ├── mod.rs
+│   ├── colors.rs          # 40+ color aliases, ColorValue
+│   ├── tables.rs          # QuickTable, table helpers
+│   ├── shapes.rs          # rect(), circle(), etc.
+│   └── ext.rs             # ShapeExt extension methods
+├── export/                # Export to HTML, Markdown, images
+├── import/                # PPTX import, HTML-to-PPTX
+├── diff/                  # Semantic slide-level comparison (`compare_presentations`, v0.2.30)
+├── pipeline/              # Batch MD/HTML → deck-per-file (`run_directory`, `BatchOptions`, v0.2.31)
+├── http/                  # REST API (`/v1/generate`, validate, export, diff; feature = "http", v0.2.34)
+├── cli/                   # CLI commands + Markdown parser + Mermaid renderers
+├── mcp/                   # (Optional) MCP server (feature-gated)
+├── web2ppt/               # (Optional) Web-to-PPTX conversion
+└── bin/
+    ├── pptcli.rs         # CLI binary entry point
+    ├── ppt_mcp.rs        # MCP server binary (`mcp` feature)
+    └── ppt_http.rs       # REST/HTTP server binary (`http` feature)
+```
+
+## PPTX Generation Approach
+
+### Overview
+
+The library generates proper Microsoft PowerPoint 2007+ (.pptx) files by creating a complete ZIP-based package structure that conforms to the ECMA-376 Office Open XML standard.
+
+### Generation Process
+
+#### 1. Package Structure Creation
+The generator creates a complete PPTX package with the following structure:
+
+```
+presentation.pptx (ZIP file)
+├── [Content_Types].xml          # Content type declarations
+├── _rels/
+│   └── .rels                    # Package relationships
+├── ppt/
+│   ├── presentation.xml         # Main presentation document
+│   ├── _rels/
+│   │   └── presentation.xml.rels # Presentation relationships
+│   ├── slides/
+│   │   ├── slide1.xml           # Individual slides
+│   │   ├── slide2.xml
+│   │   └── _rels/
+│   │       ├── slide1.xml.rels  # Slide relationships
+│   │       └── slide2.xml.rels
+│   ├── slideLayouts/
+│   │   ├── slideLayout1.xml     # Slide layout templates
+│   │   └── _rels/
+│   │       └── slideLayout1.xml.rels
+│   ├── slideMasters/
+│   │   ├── slideMaster1.xml     # Slide master
+│   │   └── _rels/
+│   │       └── slideMaster1.xml.rels
+│   └── theme/
+│       └── theme1.xml           # Color theme definitions
+└── docProps/
+    ├── core.xml                 # Document properties (title, author, etc.)
+    └── app.xml                  # Application-specific properties
+```
+
+#### 2. XML Generation
+
+Each component is generated with proper Office Open XML structure:
+
+- **[Content_Types].xml**: Declares MIME types for all package parts
+- **Relationships (.rels)**: Define connections between package parts
+- **presentation.xml**: Root presentation document with slide references
+- **slide*.xml**: Individual slide content with shapes and text
+- **slideLayout*.xml**: Layout templates defining slide structure
+- **slideMaster*.xml**: Master slide with default formatting
+- **theme*.xml**: Color schemes and fonts
+- **core.xml**: Document metadata (title, creation date, etc.)
+- **app.xml**: Application properties (slide count, etc.)
+
+#### 3. ZIP Packaging
+
+All XML files are compressed into a single ZIP archive with:
+- Proper compression levels
+- Correct file ordering
+- Valid ZIP headers and footers
+- No extra metadata
+
+#### 4. Generator Module (`generator.rs`)
+
+The `generator::create_pptx()` function:
+
+```rust
+pub fn create_pptx(title: &str, slides: usize) -> Result<Vec<u8>>
+```
+
+This function:
+1. Creates all required XML documents with proper namespaces
+2. Generates the specified number of slides
+3. Creates relationships between all parts
+4. Packages everything into a ZIP archive
+5. Returns the complete PPTX as a byte vector
+
+### Key Features
+
+- **Proper ZIP Structure**: Uses the `zip` crate to create valid ZIP files
+- **XML Namespaces**: Correctly declares all Office Open XML namespaces
+- **Relationships**: Properly manages part relationships and IDs
+- **Metadata**: Includes document properties (title, creation date, etc.)
+- **Themes**: Includes default color theme for consistent formatting
+- **Layouts**: Provides slide layout templates for proper slide structure
+
+### Validation
+
+Generated PPTX files are validated as:
+- Proper ZIP archives (recognized by `file` command as "Microsoft PowerPoint 2007+")
+- Readable by Microsoft PowerPoint, LibreOffice, and other Office applications
+- Containing all required ECMA-376 compliant components
+
+### Usage
+
+```rust
+// Generate a PPTX with 5 slides
+let pptx_data = generator::create_pptx("My Presentation", 5)?;
+
+// Write to file
+std::fs::write("presentation.pptx", pptx_data)?;
+```
+
+## Table XML Structure
+
+Tables in PPTX follow a specific XML structure. The critical ordering is:
+
+```xml
+<a:tc>
+  <a:txBody>           <!-- TEXT BODY MUST COME FIRST -->
+    <a:bodyPr/>
+    <a:lstStyle/>
+    <a:p>
+      <a:r>
+        <a:rPr lang="en-US" dirty="0"/>
+        <a:t>Cell Text</a:t>
+      </a:r>
+    </a:p>
+  </a:txBody>
+  <a:tcPr/>            <!-- CELL PROPERTIES COME SECOND -->
+</a:tc>
+```
+
+**Key Points:**
+- `<a:txBody>` must come BEFORE `<a:tcPr>` (learned from reference PPTX analysis)
+- Simple `<a:rPr>` with minimal attributes works best
+- Optional formatting (bold, italic, color) added as attributes or child elements
+
+## Generator Module Structure
+
+```
+├── generator/          # Generator module
+│   ├── mod.rs          # Module exports
+│   ├── builder.rs      # PPTX creation functions
+│   ├── slide_xml/      # Modular slide XML generation
+│   │   ├── mod.rs
+│   │   ├── common.rs
+│   │   ├── layouts.rs
+│   │   └── content.rs
+│   ├── slide_content/  # Slide content types (v0.2.x)
+│   │   ├── mod.rs
+│   │   ├── content.rs
+│   │   ├── bullet.rs
+│   │   ├── layout.rs
+│   │   ├── transition.rs
+│   │   └── code_block.rs
+│   ├── charts/         # Chart module (v0.2.3; Excel embedding v0.2.19)
+│   │   ├── mod.rs
+│   │   ├── builder.rs
+│   │   ├── data.rs
+│   │   ├── types.rs
+│   │   ├── xml.rs
+│   │   └── embedding.rs  # Embedded workbook + chart rels (v0.2.19)
+│   ├── table/          # Modular table module
+│   │   ├── mod.rs
+│   │   ├── cell.rs
+│   │   ├── row.rs
+│   │   ├── builder.rs
+│   │   └── xml.rs
+│   ├── layout_parts.rs # slideLayoutN.xml + master footers (v0.2.19)
+│   ├── template.rs     # PptxTemplate — load masters/theme/layouts (v0.2.19)
+│   ├── package_cache.rs # Package byte cache / diff helpers (v0.2.19)
+│   ├── media_registry.rs # Media de-duplication registry (v0.2.19)
+│   ├── memory_profile.rs # Generation metrics + capacity estimation
+│   ├── shapes.rs       # Shape types
+│   ├── shapes_xml.rs   # Shape XML generation
+│   ├── images.rs       # Image types
+│   ├── image_effects.rs # Modular image effects XML
+│   ├── images_xml.rs   # Image XML generation
+│   ├── connectors.rs   # Connector shapes
+│   ├── hyperlinks.rs   # Hyperlink support
+│   ├── gradients.rs    # Gradient fills
+│   ├── media.rs        # Video/audio
+│   ├── package_xml.rs  # Package-level XML (rels/presProps/viewProps/tableStyles/handout master)
+│   ├── presentation_theme.rs # Customizable theme colors/fonts
+│   ├── theme_xml.rs    # Theme XML generation
+│   ├── props_xml.rs    # Properties XML
+│   └── notes_xml.rs    # Notes XML
+├── export/             # Export module (v0.2.2)
+│   ├── mod.rs
+│   ├── html.rs
+│   └── html_style.css
+├── import/             # Import module (v0.2.2)
+│   └── mod.rs
+├── web2ppt/            # Web to PPT converter (feature-gated)
+│   ├── mod.rs
+│   ├── converter.rs
+│   ├── config.rs
+│   ├── fetcher.rs
+│   ├── parser.rs
+│   └── web2md_bridge.rs  # HTML→Markdown→Slides bridge (v0.2.24, `web2md` feature)
+├── cli/                # CLI module
+```
+
+## CLI Module Structure
+
+```
+src/cli/
+├── mod.rs              # Module exports
+├── commands.rs         # CLI commands
+├── syntax.rs           # Syntax highlighting (Solarized Dark)
+└── markdown/           # Markdown parsing (v0.1.7)
+    ├── mod.rs          # Module exports
+    ├── parser.rs       # Markdown parser state machine
+    └── mermaid/        # Mermaid diagram rendering
+        ├── mod.rs      # Detection and dispatch
+        ├── types.rs    # Shared types
+        ├── flowchart.rs
+        ├── sequence.rs
+        ├── pie.rs
+        ├── gantt.rs
+        ├── class_diagram.rs
+        ├── state_diagram.rs
+        ├── er_diagram.rs
+        ├── mindmap.rs
+        ├── timeline.rs
+        ├── gitgraph.rs
+        ├── journey.rs
+        └── quadrant.rs
+```
+
+## Completed Features
+
+- [x] Complete OXML element implementations
+- [x] Full ZIP file handling
+- [x] XML serialization/deserialization
+- [x] Relationship management
+- [x] Part factory implementation
+- [x] Chart data handling (18+ chart types)
+- [x] Media embedding (video, audio)
+- [x] Theme support (default Office theme)
+- [x] Advanced theme customization — `PresentationTheme`, custom colors/fonts embedded in `theme1.xml` (v0.2.16)
+- [x] Master slide support
+- [x] Animation support (50+ effects)
+- [x] Transition support (27 effects)
+- [x] SmartArt support (25 layouts)
+- [x] 3D model support
+- [x] VBA macro support
+- [x] Custom XML support
+- [x] Table cell formatting and text rendering
+- [x] Syntax highlighting for code blocks (Solarized Dark)
+- [x] Auto-fit font sizing for shapes
+- [x] Automatic text color contrast
+- [x] Prelude module with simplified API (v0.1.8)
+- [x] Gradient fills (linear, multi-stop, custom angles)
+- [x] Transparency for solid fills
+- [x] Styled connectors (arrows, dash styles)
+- [x] 12 Mermaid diagram types
+- [x] Table merging (rowspan/colspan)
+- [x] HTML/PDF export
+- [x] Image effects (shadow, reflection, glow, soft edges, inner shadow, blur, crop)
+- [x] Enhanced Markdown: Real images, task lists, strikethrough formatting (v0.2.14)
+- [x] Enhanced HTML: Extended CSS, real image downloading, hyperlink handling (v0.2.14)
+- [x] Enhanced HTML Export: Interactive navigation, speaker notes, keyboard controls (v0.2.14)
+- [x] HTML Parser Documentation: Comprehensive parser comparison guide (v0.2.14)
+- [x] Structured package validation (`core::package_validation`) + debug-build self-check (v0.2.19)
+- [x] Multiple slide layouts + per-slide layout selection (v0.2.19)
+- [x] Template-based generation (`PptxTemplate`, `--template`) (v0.2.19)
+- [x] Chart Excel workbook embedding for editable charts (v0.2.19)
+- [x] Handout master packaging + slide master completeness + rel ordering (v0.2.19)
+- [x] `PresentationEditor` — duplicate, reorder, insert slide at index, batch replace (v0.2.20)
+- [x] Core validation integrated into `pptcli validate` (v0.2.20)
+- [x] Embedded fonts + ink annotations wired into generator; digital signatures packaged (v0.2.20)
+- [x] Lean audit — dead code removal, `escape_xml` hot-path, `XmlWriter` cleanup (v0.2.21)
+- [x] Structured `pptcli validate` report + `--json` for CI (v0.2.21)
+- [x] Pure-Rust PDF export via `pdfrs` (`pdf-native` feature, no LibreOffice) (v0.2.23)
+- [x] `web2md` bridge — HTML→Markdown→Slides pipeline with `--web2md` CLI flag (v0.2.24)
+
+## Image Effects System (v0.2.10)
+
+### Architecture
+
+```
+ImageBuilder
+    ↓
+Image struct (with effects, crop)
+    ↓
+generate_image_xml() → OOXML with effects
+    ↓
+Embedded in slide with relationships
+```
+
+### Supported Effects
+
+- **Shadow** (`ImageEffect::Shadow`) - Outer drop shadow with blur and offset
+- **Reflection** (`ImageEffect::Reflection`) - Mirror effect below image
+- **Glow** (`ImageEffect::Glow`) - Golden aura around image
+- **Soft Edges** (`ImageEffect::SoftEdges`) - Feathered borders
+- **Inner Shadow** (`ImageEffect::InnerShadow`) - Inset shadow for depth
+- **Blur** (`ImageEffect::Blur`) - Artistic defocus effect
+
+### Cropping
+
+- Percentage-based (0.0-1.0) for left, top, right, bottom
+- Applied via `<a:srcRect>` in OOXML
+
+### Builder Methods
+
+```rust
+// Single effects
+.build_with_shadow()
+.build_with_reflection()
+.build_with_glow()
+.build_with_soft_edges()
+.build_with_inner_shadow()
+.build_with_blur()
+
+// Cropping
+.build_with_crop(left, top, right, bottom)
+
+// Combined
+.build_with_effects() // shadow + reflection
+```
+
+### XML Generation
+
+Effects are rendered in `<a:effectLst>` within `<p:spPr>`:
+
+```xml
+<a:effectLst>
+  <a:outerShdw blurRad="40000" dist="20000" dir="5400000" rotWithShape="0">
+    <a:srgbClr val="000000"><a:alpha val="40000"/></a:srgbClr>
+  </a:outerShdw>
+  <a:reflection blurRad="6350" stA="50000" endA="300" endPos="35000".../>
+</a:effectLst>
+```
+
+### Relationship Handling
+
+- Image files written to `ppt/media/imageN.{ext}` with correct extension
+- Relationships use actual file extensions (`.jpg`, `.png`, `.gif`)
+- Fixed in v0.2.10 to support JPEG images correctly
+
+### Implementation Files
+
+- `src/generator/images.rs` - ImageEffect enum, ImageBuilder methods
+- `src/generator/images_xml.rs` - XML generation for effects
+- `src/generator/builder.rs` - Image extension collection and passing
+- `src/generator/package_xml.rs` - Relationship generation with extensions
+
+## Future Enhancements
+
+- [x] API Simplification — Color & Table helpers (v0.2.11)
+- [x] Export & Compression — Full round-trip capabilities (v0.2.12)
+- [x] MCP Server — AI assistant integration (v0.2.13)
+- [x] Advanced theme customization (v0.2.16)
+- [x] PowerPoint compatibility gate — structured `core::package_validation` (v0.2.19)
+- [x] Multiple slide layouts + per-slide selection (v0.2.19)
+- [x] Template-based generation (v0.2.19)
+- [x] Chart Excel workbook embedding (v0.2.19)
+- [x] Handout master packaging + slide master completeness + rel ordering (v0.2.19)
+- [x] Digital signature wiring (Content_Types + _rels) (v0.2.20)
+- [x] Ink annotations wiring (ink part + relationship) (v0.2.20)
+- [x] Embedded fonts in output (font data parts + rId wiring) (v0.2.20)
+- [x] Benchmark suite — Criterion suites for eager/lazy/compression (v0.2.32)
+- [ ] Fuzzing tests for PPTX parsing
+- [ ] Property-based testing
+- [ ] Cross-platform testing (Windows, macOS, Linux)

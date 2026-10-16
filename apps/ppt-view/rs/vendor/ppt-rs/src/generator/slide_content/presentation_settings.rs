@@ -1,0 +1,138 @@
+//! Presentation-level settings that get embedded into the PPTX package
+//!
+//! Aggregates slide show settings, print settings, embedded fonts,
+//! and digital signatures into a single struct passed to the builder.
+
+use super::comments::CommentAuthorList;
+use super::digital_signature::DigitalSignature;
+use super::embedded_fonts::EmbeddedFontList;
+use super::print_settings::PrintSettings;
+use super::sections::SectionManager;
+use super::slide_show_settings::SlideShowSettings;
+use crate::generator::PresentationTheme;
+
+/// Presentation-level settings for the PPTX package
+#[derive(Clone, Debug, Default)]
+pub struct PresentationSettings {
+    /// Color and font theme (`ppt/theme/theme1.xml`)
+    pub theme: Option<PresentationTheme>,
+    /// Slide show settings (generates `<p:showPr>` in presentation.xml)
+    pub slide_show: Option<SlideShowSettings>,
+    /// Print settings (generates `<p:prnPr>` in presentation.xml)
+    pub print: Option<PrintSettings>,
+    /// Embedded fonts (generates `<p:embeddedFontLst>` in presentation.xml)
+    pub embedded_fonts: Option<EmbeddedFontList>,
+    /// Digital signature (generates `_xmlsignatures/` parts in package)
+    pub digital_signature: Option<DigitalSignature>,
+    /// Comment authors (generates `ppt/commentAuthors.xml`; slide comments
+    /// reference these authors by id)
+    pub comment_authors: CommentAuthorList,
+    /// Slide sections (emitted as `<p14:sectionLst>` in `presentation.xml`
+    /// and available to section-aware export)
+    pub sections: SectionManager,
+    /// Optional `.pptx` template path — clones masters/theme/layouts from an existing deck.
+    pub template_path: Option<String>,
+}
+
+impl PresentationSettings {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn theme(mut self, theme: PresentationTheme) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
+    pub fn slide_show(mut self, settings: SlideShowSettings) -> Self {
+        self.slide_show = Some(settings);
+        self
+    }
+
+    pub fn print(mut self, settings: PrintSettings) -> Self {
+        self.print = Some(settings);
+        self
+    }
+
+    pub fn embedded_fonts(mut self, fonts: EmbeddedFontList) -> Self {
+        self.embedded_fonts = Some(fonts);
+        self
+    }
+
+    pub fn digital_signature(mut self, sig: DigitalSignature) -> Self {
+        self.digital_signature = Some(sig);
+        self
+    }
+
+    pub fn template(mut self, path: impl Into<String>) -> Self {
+        self.template_path = Some(path.into());
+        self
+    }
+
+    /// Check if any presentation-level settings are configured
+    pub fn has_settings(&self) -> bool {
+        self.theme.is_some()
+            || self.slide_show.is_some()
+            || self.print.is_some()
+            || self.embedded_fonts.is_some()
+            || self.digital_signature.is_some()
+            || !self.comment_authors.is_empty()
+            || !self.sections.is_empty()
+            || self.template_path.is_some()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_default_has_no_settings() {
+        let settings = PresentationSettings::new();
+        assert!(!settings.has_settings());
+    }
+
+    #[test]
+    fn test_with_theme() {
+        let settings = PresentationSettings::new().theme(PresentationTheme::corporate());
+        assert!(settings.has_settings());
+        assert!(settings.theme.is_some());
+    }
+
+    #[test]
+    fn test_with_slide_show() {
+        let settings = PresentationSettings::new().slide_show(SlideShowSettings::new());
+        assert!(settings.has_settings());
+        assert!(settings.slide_show.is_some());
+    }
+
+    #[test]
+    fn test_with_print() {
+        let settings = PresentationSettings::new().print(PrintSettings::new());
+        assert!(settings.has_settings());
+        assert!(settings.print.is_some());
+    }
+
+    #[test]
+    fn test_with_embedded_fonts() {
+        let settings = PresentationSettings::new().embedded_fonts(EmbeddedFontList::new());
+        assert!(settings.has_settings());
+        assert!(settings.embedded_fonts.is_some());
+    }
+
+    #[test]
+    fn test_comment_authors_enable_settings() {
+        let mut settings = PresentationSettings::new();
+        assert!(!settings.has_settings());
+        settings.comment_authors.get_or_add("Alice", "A");
+        assert!(settings.has_settings());
+    }
+
+    #[test]
+    fn test_sections_enable_settings() {
+        let mut settings = PresentationSettings::new();
+        assert!(!settings.has_settings());
+        settings.sections.add_section("Intro", 0, 1).unwrap();
+        assert!(settings.has_settings());
+    }
+}

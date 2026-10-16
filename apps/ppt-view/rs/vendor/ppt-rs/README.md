@@ -1,0 +1,1063 @@
+# ppt-rs
+
+[![Crates.io](https://img.shields.io/crates/v/ppt-rs)](https://crates.io/crates/ppt-rs)
+[![Docs.rs](https://docs.rs/ppt-rs/badge.svg)](https://docs.rs/ppt-rs)
+[![Crates.io Downloads](https://img.shields.io/crates/d/ppt-rs)](https://crates.io/crates/ppt-rs)
+[![License](https://img.shields.io/crates/l/ppt-rs)](https://github.com/yingkitw/ppt-rs/blob/main/LICENSE)
+[![Rust Edition](https://img.shields.io/badge/edition-2024-orange)](https://www.rust-lang.org/)
+[![GitHub Repo](https://img.shields.io/badge/github-yingkitw%2Fppt-rs-blue?logo=github)](https://github.com/yingkitw/ppt-rs)
+[![GitHub Stars](https://img.shields.io/github/stars/yingkitw/ppt-rs?style=social)](https://github.com/yingkitw/ppt-rs/stargazers)
+[![MCP Server](https://img.shields.io/badge/MCP-ppt__mcp-purple)](https://modelcontextprotocol.io)
+[![Related: xls-rs](https://img.shields.io/crates/v/xls-rs?label=xls-rs)](https://crates.io/crates/xls-rs)
+
+**The Rust library for generating PowerPoint presentations that actually works.**
+
+While other Rust crates for PPTX generation are incomplete, broken, or abandoned, `ppt-rs` generates **valid, production-ready PowerPoint files** that open correctly in PowerPoint, LibreOffice, Google Slides, and other Office applications.
+
+**Related:** For Excel, see [`xls-rs`](https://crates.io/crates/xls-rs).
+
+**MCP:** Build with `--features mcp` and run **`ppt_mcp`** — a [Model Context Protocol](https://modelcontextprotocol.io) server ([rmcp](https://crates.io/crates/rmcp)) so Cursor, Claude Desktop, and other MCP clients can create, read, export, and validate `.pptx` via stdio. See [MCP server](#mcp-server-model-context-protocol).
+
+**NEW v0.2.36**: clippy `--all-features --all-targets -D warnings` green for the first time (lib + bins + tests + examples) — 53 mechanical/structural lints fixed (`collapsible_if`, `collapsible_match`, `useless_vec`, `len_zero`, `ptr_arg`). **v0.2.35**: full review-comments round-trip — `import_pptx` preserves authors and per-slide comments. **v0.2.34**: optional REST/HTTP server (`http` feature, `ppt_http` binary). **v0.2.30**: semantic slide-level diff (`pptcli diff`, MCP `diff_pptx`). **v0.2.24**: `web2md` bridge — HTML→Markdown→Slides pipeline via the `web2md` crate with a `--web2md` CLI flag on `web2ppt`. **v0.2.23**: pure-Rust PDF export via `pdfrs` (`pdf-native` feature, no LibreOffice dependency). **v0.2.19**: PowerPoint zero-repair compatibility gate — multiple slide layouts, template-based generation, chart Excel workbook embedding, handout master packaging, slide master completeness, and a structured `core::package_validation` API.
+
+## Why ppt-rs?
+
+- 🤖 **MCP server** - Optional `ppt_mcp` binary exposes presentation workflows as MCP tools for AI assistants and IDE integrations (`--features mcp`).
+- 🚀 **Markdown to PPTX** - Write slides in Markdown, get PowerPoint files. Perfect for developers.
+- 🌐 **HTML to PPTX** - Convert HTML pages/snippets to PowerPoint with the `html2ppt` command or `Html2Ppt` API; `--web2md` routes HTML→Markdown→Slides (v0.2.24)
+- 📄 **Pure-Rust PDF export** - `pdfrs`-backed PDF generation with no LibreOffice dependency (`pdf-native` feature) (v0.2.23)
+- 📥 **PDF to PPTX conversion** - `pptcli pdf2ppt input.pdf output.pptx` — extract slides from a PDF and emit a deck (uses the `pdf-native` renderer)
+- 📝 **Text extraction** - `extract_slide_texts_from_bytes(&bytes)` returns `Vec<Vec<String>>` (per-slide paragraphs) from a PPTX byte buffer — pure content extraction with no XML leakage
+- ✏️ **TextFrame editing** - `PresentationEditor::set_shape_text()` / `add_paragraph()` / `add_paragraph_with_format()` / `set_title_text()` on imported decks (python-pptx parity: `tf.text = …`, `tf.add_paragraph()`, `p.level` / `p.font.bold`); `ParsedShape::has_text_frame()` predicate for safe editing
+- 🎨 **Embedded themes** - Brand decks with custom colors and fonts via `PresentationTheme` (v0.2.16)
+- ⚡ **Large decks** - Lazy slide loading and optimized generation for 100+ slides (v0.2.17)
+- 🧩 **Templates & layouts** - Clone masters/theme/layouts from an existing deck (`--template`) and pick from 7 slide layouts per slide (v0.2.19)
+- 🛡️ **PowerPoint compat gate** - Structured `validate_package_bytes()` report + debug assert on every generated deck so files open without repair (v0.2.19)
+- 📊 **Editable charts** - Charts embed an Excel workbook (`ppt/embeddings/*.xlsx`) so they're editable in PowerPoint (v0.2.19)
+- 🔄 **Round-trip capable** - Export to Markdown, HTML, images (PNG/JPEG), compress PPTX files — PDF and image export need no LibreOffice
+- ✅ **Actually works** - Generates valid PPTX files that open in all major presentation software
+- ✅ **Complete implementation** - Full ECMA-376 Office Open XML compliance
+- ✅ **Type-safe API** - Rust's type system ensures correctness
+- ✅ **Simple & intuitive** - Builder pattern with fluent API
+
+## Quick Start
+
+### Markdown to PowerPoint (Recommended)
+
+The easiest way to create presentations: write Markdown, get PowerPoint.
+
+**1. Create a Markdown file:**
+
+```markdown
+# Introduction
+- Welcome to the presentation
+- Today's agenda
+
+# Key Points
+- First important point
+- Second important point
+- Third important point
+
+# Conclusion
+- Summary of takeaways
+- Next steps
+```
+
+**2. Convert to PPTX:**
+
+```bash
+# Auto-generates slides.pptx
+pptcli md2ppt slides.md
+
+# Or specify output
+pptcli md2ppt slides.md presentation.pptx
+
+# With custom title
+pptcli md2ppt slides.md --title "My Presentation"
+```
+
+That's it! You now have a valid PowerPoint file that opens in PowerPoint, Google Slides, LibreOffice, and more.
+
+### Create from a Template (v0.2.19)
+
+Clone masters, layouts, theme, and table styles from an existing `.pptx` so new slides inherit the source deck's branding:
+
+```bash
+# CLI: use a template deck
+pptcli create output.pptx --title "Quarterly Review" --slides 8 --template brand.pptx
+```
+
+```rust
+use ppt_rs::generator::{create_pptx_with_template, SlideContent};
+use ppt_rs::SlideLayout;
+
+let slides = vec![
+    SlideContent::new("Cover").with_layout(SlideLayout::CenteredTitle),
+    SlideContent::new("Agenda").with_layout(SlideLayout::TitleAndContent),
+    SlideContent::new("Detail").with_layout(SlideLayout::TwoColumn),
+];
+
+// Masters/theme/layouts are copied from brand.pptx into output.pptx
+let pptx = create_pptx_with_template("Quarterly Review", &slides, "brand.pptx", None)?;
+std::fs::write("output.pptx", pptx)?;
+
+// Or via PresentationSettings:
+use ppt_rs::generator::{create_pptx_with_settings, PresentationSettings};
+let settings = PresentationSettings::new().template("brand.pptx");
+let pptx = create_pptx_with_settings("Quarterly Review", &slides, Some(settings))?;
+```
+
+`SlideLayout` variants (each maps to `slideLayoutN.xml` on slide master 1): `CenteredTitle` (1), `TitleAndContent` (2), `TwoColumn` (3), `SectionHeader` (4), `Blank` (5), `TitleOnly` (6), `TitleAndBigContent` (7). When a template has fewer layouts, the index falls back to layout 1.
+
+### HTML to PowerPoint
+
+Convert HTML directly to PowerPoint presentations — perfect for web content, documentation, and reports. Supports extended CSS, real image downloading, hyperlink handling, and styled tables with header rows.
+
+**1. CLI — Convert an HTML file:**
+```bash
+# Auto-generates slides.pptx from slides.html
+pptcli html2ppt slides.html
+
+# Specify output file
+pptcli html2ppt slides.html presentation.pptx
+
+# With custom title
+pptcli html2ppt slides.html --title "My Presentation"
+```
+
+**2. Programmatic API — Parse HTML strings or files:**
+```rust
+use ppt_rs::generator::create_pptx_with_content;
+use ppt_rs::import::parse_html;
+
+let html = r#"
+    <h1>Introduction</h1>
+    <p>Welcome to the presentation</p>
+    <ul>
+        <li>Point one</li>
+        <li>Point two</li>
+    </ul>
+    <h1>Data</h1>
+    <table>
+        <tr><th>Item</th><th>Value</th></tr>
+        <tr><td>A</td><td>100</td></tr>
+    </table>
+"#;
+
+let slides = parse_html(html)?;
+let pptx = create_pptx_with_content("My Presentation", slides)?;
+std::fs::write("output.pptx", pptx)?;
+```
+
+**3. Html2Ppt struct with options:**
+```rust
+use ppt_rs::import::{Html2Ppt, HtmlParseOptions};
+
+let options = HtmlParseOptions::new()
+    .max_slides(20)
+    .max_bullets(8)
+    .include_code(true);
+
+let slides = Html2Ppt::with_options(options).parse_file("page.html")?;
+```
+
+**HTML element mapping:**
+| HTML | PPTX Result |
+|------|-------------|
+| `<h1>` | New slide with title |
+| `<h2>`–`<h6>` | Bold section headers |
+| `<p>` | Bullet points |
+| `<ul>`/`<ol>` | List items |
+| `<table>` | Table with styled header |
+| `<pre>`/`<code>` | Code blocks |
+| `<blockquote>` | Speaker notes |
+| `<hr>` | Slide break |
+| `<img>` | Image embedding (real URLs & local files) |
+| `<a href>` | Hyperlink preservation |
+| `style=""` | Enhanced CSS (margins, padding, borders, etc.) |
+
+### Library (Simplified API)
+
+```rust
+use ppt_rs::prelude::*;
+
+fn main() -> Result<()> {
+    let slides = vec![
+        // Shapes with color aliases
+        SlideContent::new("Colorful Shapes")
+            .add_shape(
+                rect(0.5, 1.5, 2.0, 1.0)
+                    .fill(blue().to_color())
+                    .text("Blue Rectangle")
+            )
+            .add_shape(
+                circle(3.0, 1.5, 1.5)
+                    .fill(red().lighter(0.3).to_color())
+                    .text("Light Red Circle")
+            ),
+        
+        // Quick table creation
+        SlideContent::new("Employee Directory")
+            .table(
+                QuickTable::new(3)
+                    .header(&["Name", "Role", "Status"])
+                    .row(&["Alice", "Engineer", "Active"])
+                    .row(&["Bob", "Designer", "Active"])
+                    .at(1.0, 1.5)
+                    .build()
+            ),
+    ];
+    
+    let pptx = create_pptx_with_content("My Presentation", slides)?;
+    std::fs::write("output.pptx", pptx)?;
+    Ok(())
+}
+```
+
+**Simplified API Features:**
+- 🎨 **Color Aliases**: `red()`, `blue()`, `green()`, `orange()`, `material_blue()`, etc.
+- 🌈 **Color Adjustments**: `.lighter()`, `.darker()`, `.opacity()`, `.mix()`
+- 📊 **Quick Tables**: `QuickTable::new(cols).header().row().build()`
+- 🔷 **Shape Helpers**: `rect()`, `circle()`, `ellipse()`, `triangle()`, `diamond()`
+- ✨ **Extension Methods**: `.fill()`, `.stroke()`, `.text()` (shorter than `.with_fill()`, etc.)
+
+### Library (Full API)
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::generator::SlideContent;
+
+fn main() -> std::result::Result<(), Box<dyn std::error::Error>> {
+    let pres = Presentation::with_title("My Presentation")
+        .add_slide(SlideContent::new("Introduction")
+            .add_bullet("Welcome")
+            .add_bullet("Agenda"))
+        .add_slide(SlideContent::new("Key Points")
+            .add_bullet("Point 1")
+            .add_bullet("Point 2"));
+
+    // Borrow slides (no clone) or consume with into_bytes()
+    pres.save("output.pptx")?;
+    Ok(())
+}
+```
+
+## Features
+
+### Core Capabilities
+- **Slides** - Multiple layouts (title-only, two-column, blank, etc.)
+- **Text** - Titles, bullets, formatting (bold, italic, colors, sizes)
+- **Bullet Styles** - Numbered, lettered, Roman numerals, custom characters, hierarchical
+- **Text Enhancements** - Strikethrough, highlight, subscript, superscript
+- **Tables** - Cell formatting (alignment, wrap, merge), shared header presets for HTML/Markdown import
+- **Shapes** - 100+ shape types with gradient fills and transparency
+- **Connectors** - Straight, elbow, curved with arrows and dash styles
+- **Charts** - Bar, line, pie charts with multiple series
+- **Images** - Embed from files, bytes, base64, URL, auto-detect format, 8 visual effects
+- **Themes** - Embedded `theme1.xml` with 7 presets and custom color/font schemes (v0.2.16)
+- **Media** - Video (mp4, webm) and audio (mp3, wav) embedding
+- **Layouts** - 7 slide layouts (Title, Title+Content, Two Column, Section Header, Blank, Title Only, Big Content) with per-slide `with_layout()` (v0.2.19) — title and body shapes emit `<p:ph type="…"/>` so PowerPoint recognizes them as layout placeholders (python-pptx parity)
+- **Templates** - `--template deck.pptx` CLI flag + `PptxTemplate`/`create_pptx_with_template` API to clone masters/theme/layouts from an existing file (v0.2.19)
+- **Charts (editable)** - Charts embed an Excel workbook so they're editable in PowerPoint, not cache-only XML (v0.2.19); tune with `ChartBuilder::legend(LegendConfig)`, `value_axis(AxisConfig)` / `category_axis(AxisConfig)` (min/max/log_scale/number_format/tick_label_rotation/font), and `data_labels(DataLabelsConfig)` (python-pptx + pptxgenjs parity)
+- **Validation** - `core::package_validation` exposes `validate_package_bytes()` returning a structured `PackageValidationReport` (v0.2.19)
+- **Reading** - Parse and modify existing PPTX files
+- **Enhanced HTML Import** - Real image downloading, extended CSS, hyperlink handling
+- **Enhanced Markdown Import** - Real image URLs, task lists, strikethrough formatting
+- **Enhanced HTML Export** - Interactive navigation, speaker notes, keyboard controls
+- **Performance** - Borrow-based build API, lazy slide loading, pre-sized ZIP buffers (v0.2.17)
+- **Repair** - Validate and fix damaged PPTX files
+- **MCP** - Optional **ppt_mcp** stdio server ([Model Context Protocol](https://modelcontextprotocol.io); Cargo feature `mcp`) exposes creation, Markdown conversion, export, merge, validation, tables, and charts to MCP clients
+
+### Markdown Format
+
+The Markdown format supports rich content:
+
+| Syntax | Result |
+|--------|--------|
+| `# Heading` | New slide with title |
+| `## Subheading` | Bold bullet point |
+| `- Bullet` | Bullet points (also `*`, `+`) |
+| `- [x] Task` | Task list with completed checkbox |
+| `- [ ] Todo` | Task list with uncompleted checkbox |
+| `1. Item` | Numbered list |
+| `**bold**` | Bold text |
+| `*italic*` | Italic text |
+| `~~strikethrough~~` | Strikethrough text |
+| `` `code` `` | Inline code |
+| `> Quote` | Speaker notes |
+| `| Table |` | GFM-style tables |
+| ` ```code``` ` | Syntax-highlighted code blocks |
+| ` ```mermaid ` | Mermaid diagrams (12 types) |
+| `
+![Image](url)
+` | Real image embedding (local & web URLs) |
+| `---` | Slide break |
+
+**Code Block Syntax Highlighting:**
+Code blocks are rendered with Solarized Dark theme colors:
+- **Blue** - Keywords (`fn`, `let`, `def`, `class`)
+- **Yellow** - Function names
+- **Cyan** - Strings
+- **Green** - Operators, macros
+- **Violet** - Numbers
+- **Orange** - Format specifiers
+
+**Example:**
+```markdown
+# Introduction
+- Welcome to the presentation
+- **Key point** with emphasis
+
+# Data Table
+| Product | Sales |
+|---------|-------|
+| Widget  | $100  |
+
+> Speaker notes go here
+
+# Code Example
+```python
+print("Hello!")
+```
+
+# Conclusion
+- Summary
+- Q&A
+```
+
+Convert with: `pptcli md2ppt presentation.md` → `presentation.pptx`
+
+## CLI Commands
+
+### Convert HTML to PowerPoint
+
+Convert HTML files or snippets to PowerPoint presentations:
+
+```bash
+pptcli html2ppt input.html [output.pptx] [--title "Title"] [--max-slides N] [--max-bullets N]
+```
+
+Options: `--no-images`, `--no-tables`, `--no-code` to disable specific content types.
+### Validate PPTX Files
+
+Validate a PPTX file for ECMA-376 compliance:
+
+```bash
+pptcli validate presentation.pptx
+pptcli validate presentation.pptx --json   # CI-friendly structured report
+```
+
+This checks:
+
+- ZIP archive integrity
+- Required XML files presence
+- XML validity
+- Relationships structure
+
+**Structured package validation (v0.2.19)** — run the same engine the generator self-checks with:
+
+```rust
+use ppt_rs::{validate_package_bytes, ValidationSeverity};
+
+let bytes = std::fs::read("presentation.pptx")?;
+let report = validate_package_bytes(&bytes);
+println!("{} error(s)", report.error_count());
+for issue in &report.issues {
+    println!("  [{:?}] {}", issue.severity, issue.message);
+}
+assert!(report.is_valid()); // true when there are no Error-severity findings
+```
+
+`PackageValidationReport` categorizes findings (`ValidationCategory`: MissingPart, Relationship, ContentType, Presentation, SlideMaster, Slide, Chart, Xml, Theme) and splits them by `ValidationSeverity` (Warning / Error). The legacy `validate_powerpoint_structure()` / `CompatReport` wrapper is kept for backward compatibility.
+
+### Show Presentation Information
+
+```bash
+pptcli info presentation.pptx
+```
+
+### Repair PPTX Files
+
+Repair damaged or corrupted PPTX files:
+
+```rust
+use ppt_rs::oxml::repair::PptxRepair;
+
+// Open and validate
+let mut repair = PptxRepair::open("damaged.pptx")?;
+let issues = repair.validate();
+
+println!("Found {} issues", issues.len());
+for issue in &issues {
+    println!("  - {} (severity: {})", issue.description(), issue.severity());
+}
+
+// Repair and save
+let result = repair.repair();
+if result.is_valid {
+    repair.save("repaired.pptx")?;
+    println!("File repaired successfully!");
+}
+```
+
+**Detectable Issues:**
+- Missing required parts (Content_Types.xml, relationships)
+- Invalid or malformed XML
+- Broken relationship references
+- Missing slide references
+- Orphan slides
+- Invalid content types
+
+### Export & Compression
+
+**Export to Markdown:**
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::export::md::MarkdownOptions;
+
+let pres = Presentation::with_title("My Presentation")
+    .add_slide(SlideContent::new("Slide 1").add_bullet("Point"));
+
+// Simple export
+pres.save_as_markdown("output.md")?;
+
+// With options
+let options = MarkdownOptions::new()
+    .with_slide_numbers(true)
+    .with_gfm_tables(true);
+pres.save_as_markdown_with_options("output.md", &options)?;
+```
+
+**Export to Images:**
+```rust
+use ppt_rs::export::image_export::{ImageExportOptions, ImageFormat};
+
+// Export all slides as PNG
+let options = ImageExportOptions::new()
+    .with_format(ImageFormat::Png)
+    .with_dpi(150);
+let paths = pres.save_as_images("output_dir/", &options)?;
+
+// Generate thumbnail
+pres.save_thumbnail("thumb.png", 300)?;
+```
+
+**Compress PPTX:**
+```rust
+use ppt_rs::opc::compress::CompressionOptions;
+
+// Analyze file size
+let analysis = pres.analyze_size()?;
+println!("{}", analysis.summary());
+
+// Compress with web optimization preset
+let options = CompressionOptions::web();
+let result = pres.compress("optimized.pptx", &options)?;
+println!("Reduced by {:.1}%", result.reduction_percent);
+```
+
+## HTTP API (optional)
+
+Headless REST access for automation and SaaS embeds (`http` feature):
+
+```bash
+cargo run --features http --bin ppt_http
+# GET  /health
+# POST /v1/generate   — JSON slides → .pptx
+# POST /v1/markdown   — Markdown → .pptx
+# POST /v1/validate   — .pptx bytes → JSON report
+# POST /v1/export/*   — .pptx → Markdown/HTML
+# POST /v1/diff       — base64-encoded pair → JSON diff
+```
+
+See `SPEC.md` for request/response details.
+
+## MCP server (Model Context Protocol)
+
+Use **`ppt_mcp`** to drive ppt-rs from MCP-compatible clients over **stdio** (newline-delimited JSON-RPC). The implementation tracks the MCP handshake (`initialize` with `protocolVersion`, `clientInfo`, then `notifications/initialized`).
+
+### Build & run
+
+```bash
+cargo build --release --features mcp --bin ppt_mcp
+./target/release/ppt_mcp   # stdio MCP transport
+```
+
+Integration tests (serial stdio harness):
+
+```bash
+cargo test --features mcp --test mcp_integration_test
+```
+
+### Client configuration
+
+Point your MCP client at the `ppt_mcp` binary (use an absolute path if the client does not inherit your `PATH`), for example:
+
+```json
+{
+  "mcpServers": {
+    "ppt-rs": {
+      "command": "/absolute/path/to/ppt_mcp",
+      "args": []
+    }
+  }
+}
+```
+
+Works with editors and assistants that support MCP (e.g. **Cursor**, **Claude Desktop**, others).
+
+### Exposed tools
+
+| Tool | Purpose |
+|------|---------|
+| `create_presentation` | Build a deck from structured slide titles/bullets |
+| `markdown_to_pptx` | Convert Markdown to `.pptx` |
+| `get_pptx_info` | Metadata: title, slide count, summaries |
+| `export_pptx` | Export to `html`, `pdf`, `markdown`, or `png` |
+| `merge_pptx` | Merge multiple presentations |
+| `validate_pptx` | Structural / ECMA-376 validation |
+| `create_presentation_with_tables` | Deck with table slides |
+| `create_presentation_with_charts` | Deck with bar/line/pie/area charts |
+| `compress_pptx` | Shrink file size (media/props/notes/comments removal) |
+| `repair_pptx` | Validate and fix damaged decks |
+| `apply_theme` | Apply an embedded theme preset to an existing deck |
+| `diff_pptx` | Semantic slide-level diff (human or JSON report) |
+
+Enable the library integration with `features = ["mcp"]` when depending on `ppt-rs` from another crate.
+
+## Installation
+
+Add to `Cargo.toml`:
+
+```toml
+[dependencies]
+ppt-rs = "0.2.36"
+
+# Optional: MCP server types / embedding (library module `ppt_rs::mcp`)
+# ppt-rs = { version = "0.2.36", features = ["mcp"] }
+```
+
+## Examples
+
+Full walkthrough of the simplified helpers, charts, themes, export, and validation:
+**[API_GUIDE.md](docs/API_GUIDE.md)**.
+
+### Tables
+
+```rust
+use ppt_rs::generator::{SlideContent, TableBuilder, TableRow, TableCell, create_pptx_with_content};
+use ppt_rs::generator::table::{header_cell, table_from_string_rows};
+
+// Shared header preset (used by HTML/Markdown import)
+let table = table_from_string_rows(
+    vec![vec!["Name".into(), "Score".into()], vec!["Alice".into(), "95".into()]],
+    true, // style first row as header
+);
+
+// Manual styling with alignment and merge
+let styled_table = TableBuilder::new(vec![2000000, 2000000, 2000000])
+    .add_row(TableRow::new(vec![
+        header_cell("Header 1"),
+        header_cell("Header 2"),
+        header_cell("Header 3"),
+    ]))
+    .add_row(TableRow::new(vec![
+        TableCell::new("Data 1").align_left().valign_top(),
+        TableCell::new("Data 2").italic(),
+        TableCell::new("Data 3").text_color("2E7D32"),
+    ]))
+    .position(500000, 1500000)
+    .build();
+
+let slides = vec![SlideContent::new("Data").table(styled_table)];
+let pptx = create_pptx_with_content("Tables", slides)?;
+```
+
+### Charts
+
+```rust
+use ppt_rs::generator::{ChartBuilder, ChartType, ChartSeries};
+
+// Create a bar chart
+let chart = ChartBuilder::new("Sales", ChartType::Bar)
+    .categories(vec!["Q1", "Q2", "Q3"])
+    .add_series(ChartSeries::new("2023", vec![100.0, 150.0, 120.0]))
+    .add_series(ChartSeries::new("2024", vec![120.0, 180.0, 150.0]))
+    .position(1000000, 1000000)
+    .size(4000000, 3000000)
+    .build();
+
+// Add to slide
+let slide = SlideContent::new("Sales Data").add_chart(chart);
+```
+
+### Slide Transitions
+
+```rust
+use ppt_rs::generator::{SlideContent, TransitionType};
+
+// Create slide with transition
+let slide = SlideContent::new("Moving On")
+    .with_transition(TransitionType::Push); // Push, Fade, Cut, Cover, etc.
+```
+
+### Table Merging
+
+```rust
+use ppt_rs::generator::{TableBuilder, TableRow, TableCell};
+
+let table = TableBuilder::new(vec![2000000, 2000000])
+    .add_row(TableRow::new(vec![
+        // Span 2 columns
+        TableCell::new("Header").with_col_span(2),
+        // Second cell skipped due to merge
+    ]))
+    .add_row(TableRow::new(vec![
+        // Span 2 rows
+        TableCell::new("Row Span").with_row_span(2),
+        TableCell::new("Data 1"),
+    ]))
+    .add_row(TableRow::new(vec![
+        // First cell skipped due to merge
+        TableCell::new("Data 2"),
+    ]))
+    .build();
+```
+
+### Shapes
+
+```rust
+use ppt_rs::generator::{Shape, ShapeType, ShapeFill, ShapeLine};
+use ppt_rs::generator::shapes::{GradientFill, GradientDirection};
+
+// Simple shape with solid fill
+let shape = Shape::new(ShapeType::Rectangle, 0, 0, 1000000, 500000)
+    .with_fill(ShapeFill::new("FF0000"))
+    .with_text("Hello");
+
+// Shape with gradient fill
+let gradient_shape = Shape::new(ShapeType::RoundedRectangle, 0, 0, 2000000, 1000000)
+    .with_gradient(GradientFill::linear("1565C0", "42A5F5", GradientDirection::Horizontal))
+    .with_text("Gradient");
+
+// Shape with transparency
+let transparent = Shape::new(ShapeType::Ellipse, 0, 0, 1500000, 1500000)
+    .with_fill(ShapeFill::new("4CAF50").with_transparency(50))
+    .with_line(ShapeLine::new("1B5E20", 25400));
+```
+
+### Connectors
+
+```rust
+use ppt_rs::generator::{Connector, ConnectorLine, ArrowType, ArrowSize, LineDash};
+
+// Straight connector with arrow
+let conn = Connector::straight(1000000, 1000000, 3000000, 1000000)
+    .with_line(ConnectorLine::new("1565C0", 25400))
+    .with_end_arrow(ArrowType::Triangle)
+    .with_arrow_size(ArrowSize::Large);
+
+// Elbow connector with dashed line
+let elbow = Connector::elbow(1000000, 2000000, 3000000, 3000000)
+    .with_line(ConnectorLine::new("2E7D32", 19050).with_dash(LineDash::Dash))
+    .with_arrows(ArrowType::Oval, ArrowType::Stealth);
+```
+
+### Bullet Styles
+
+```rust
+use ppt_rs::generator::{SlideContent, BulletStyle, BulletPoint};
+
+// Numbered list
+let slide = SlideContent::new("Steps")
+    .add_numbered("First step")
+    .add_numbered("Second step")
+    .add_numbered("Third step");
+
+// Lettered list (a, b, c)
+let slide = SlideContent::new("Options")
+    .add_lettered("Option A")
+    .add_lettered("Option B");
+
+// Roman numerals (I, II, III)
+let slide = SlideContent::new("Chapters")
+    .add_styled_bullet("Introduction", BulletStyle::RomanUpper)
+    .add_styled_bullet("Main Content", BulletStyle::RomanUpper)
+    .add_styled_bullet("Conclusion", BulletStyle::RomanUpper);
+
+// Custom bullet characters
+let slide = SlideContent::new("Custom Bullets")
+    .add_styled_bullet("Star bullet", BulletStyle::Custom('★'))
+    .add_styled_bullet("Arrow bullet", BulletStyle::Custom('→'))
+    .add_styled_bullet("Check bullet", BulletStyle::Custom('✓'));
+
+// Hierarchical (sub-bullets)
+let slide = SlideContent::new("Hierarchy")
+    .add_bullet("Main point")
+    .add_sub_bullet("Supporting detail 1")
+    .add_sub_bullet("Supporting detail 2");
+```
+
+### Text Enhancements
+
+```rust
+use ppt_rs::generator::BulletPoint;
+use ppt_rs::prelude::font_sizes;
+
+// Per-bullet formatting
+let strikethrough = BulletPoint::new("Deleted text").strikethrough();
+let highlighted = BulletPoint::new("Important!").highlight("FFFF00");
+let subscript = BulletPoint::new("H₂O").subscript();
+let superscript = BulletPoint::new("x²").superscript();
+let styled = BulletPoint::new("Bold red text").bold().color("FF0000");
+
+// Per-bullet font sizes
+let large_text = BulletPoint::new("Big text").font_size(font_sizes::LARGE);
+let small_text = BulletPoint::new("Small text").font_size(font_sizes::SMALL);
+
+// Add to slide
+let mut slide = SlideContent::new("Formatted Text");
+slide.bullets.push(strikethrough);
+slide.bullets.push(highlighted);
+slide.bullets.push(large_text);
+```
+
+### Font Size Presets
+
+```rust
+use ppt_rs::prelude::font_sizes;
+
+// Available presets (in points)
+font_sizes::TITLE    // 44pt
+font_sizes::SUBTITLE // 32pt
+font_sizes::LARGE    // 36pt
+font_sizes::HEADING  // 28pt
+font_sizes::BODY     // 18pt
+font_sizes::SMALL    // 14pt
+font_sizes::CAPTION  // 12pt
+
+// Use with slide content
+let slide = SlideContent::new("Title")
+    .title_size(font_sizes::TITLE)
+    .content_size(font_sizes::BODY);
+```
+
+### Images from Base64
+
+```rust
+use ppt_rs::generator::{Image, ImageBuilder};
+use ppt_rs::prelude::inches;
+
+// From base64 encoded string
+let base64_png = "iVBORw0KGgoAAAANSUhEUg...";
+let img = Image::from_base64(base64_png, 914400, 914400, "PNG")
+    .position(inches(2.0), inches(3.0));
+
+// From raw bytes
+let bytes = vec![0x89, 0x50, 0x4E, 0x47, ...]; // PNG data
+let img = Image::from_bytes(bytes, 914400, 914400, "PNG");
+
+// Using builder
+let img = ImageBuilder::from_base64(base64_png, inches(2.0), inches(2.0), "PNG")
+    .position(inches(4.0), inches(3.0))
+    .build();
+```
+
+### Image Effects
+
+Apply professional visual effects to images with a simple, chainable API:
+
+```rust
+use ppt_rs::generator::ImageBuilder;
+use ppt_rs::prelude::inches;
+
+// Simple: Load from file with auto-detection
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(1.0), inches(2.0))
+    .build();
+
+// Auto-detect format from bytes
+let bytes = std::fs::read("photo.jpg")?;
+let img = ImageBuilder::auto(bytes)
+    .at(inches(2.0), inches(3.0))
+    .build();
+
+// Chainable effects - shadow
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(1.0), inches(2.0))
+    .shadow()
+    .build();
+
+// Chainable effects - reflection
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(3.0), inches(2.0))
+    .reflection()
+    .build();
+
+// Chainable effects - glow
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(5.0), inches(2.0))
+    .glow()
+    .build();
+
+// Multiple effects combined
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(1.0), inches(4.0))
+    .shadow()
+    .reflection()
+    .build();
+
+// With cropping (10% from each side)
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(3.0), inches(4.0))
+    .crop(0.1, 0.1, 0.1, 0.1)
+    .build();
+
+// All together: size, position, effects, crop
+let img = ImageBuilder::from_file("photo.jpg")
+    .size(inches(3.0), inches(2.0))
+    .at(inches(2.0), inches(3.0))
+    .shadow()
+    .glow()
+    .crop(0.05, 0.05, 0.05, 0.05)
+    .build();
+```
+
+**Supported Effects:**
+- **Shadow** - Outer drop shadow with blur and offset
+- **Reflection** - Mirror effect below the image
+- **Glow** - Golden aura around the image
+- **Soft Edges** - Feathered/vignette borders
+- **Inner Shadow** - Inset shadow for depth
+- **Blur** - Artistic defocus effect
+- **Crop** - Trim edges (percentage-based)
+- **Combined** - Multiple effects together
+
+**Supported Formats:**
+- JPEG/JPG - Full support with all effects
+- PNG - Full support with all effects
+- GIF - Basic support
+- Dynamic loading from `examples/assets/` folder
+
+## What Makes This Different
+
+Unlike other Rust PPTX crates that:
+- ❌ Generate invalid files that won't open
+- ❌ Have incomplete implementations
+- ❌ Are abandoned or unmaintained
+- ❌ Lack proper XML structure
+
+`ppt-rs`:
+- ✅ Generates **valid PPTX files** from day one
+- ✅ **Actively maintained** with comprehensive test coverage (1250+ tests)
+- ✅ **Complete XML structure** following ECMA-376 standard
+- ✅ **Validation tools** - Built-in validation command + structured `PackageValidationReport` API for quality assurance
+- ✅ **PowerPoint compat gate** - Every generated deck is self-validated in debug builds
+- ✅ **Alignment testing** - Framework for ensuring compatibility with python-pptx
+- ✅ **Production-ready** - used in real projects
+
+## Quality Assurance
+
+### Validation
+- Built-in validation command for ECMA-376 compliance checking
+- Structured `core::package_validation` API (`validate_package_bytes` → `PackageValidationReport`)
+- Debug builds `debug_assert!` that every generated deck passes package validation
+- Comprehensive test suite (1250+ tests, including `package_validation_test`, `powerpoint_compat_test`, `layouts_packaging_test`, `repair_compare_test`)
+- Integration tests for end-to-end validation
+
+### Alignment Testing
+- Framework for comparing output with python-pptx standards
+- Alignment testing scripts and documentation
+- See `examples/alignment_test.rs` for details
+
+## Technical Details
+
+- **Version**: 0.2.36
+- **Format**: Microsoft PowerPoint 2007+ (.pptx)
+- **Standard**: ECMA-376 Office Open XML
+- **Compatibility**: PowerPoint, LibreOffice, Google Slides, Keynote
+- **Architecture**: Modular design with clear separation of concerns
+- **Test Coverage**: 1250+ tests covering all major features
+- **Performance**: ~1000 slides/sec; lazy loading for large decks; borrow-based `build()` API
+
+## Templates
+
+Create presentations quickly with pre-built templates:
+
+```rust
+use ppt_rs::templates::{self, ProposalContent, StatusContent};
+
+// Business proposal template
+let proposal = templates::business_proposal(
+    "Q4 Budget Proposal",
+    "Finance Team",
+    ProposalContent {
+        executive_summary: vec!["Key insight 1", "Key insight 2"],
+        problem: vec!["Current challenge"],
+        solution: vec!["Our approach"],
+        timeline: vec![("Phase 1", "Week 1-2"), ("Phase 2", "Week 3-4")],
+        budget: vec![("Development", "$100,000")],
+        next_steps: vec!["Approve budget"],
+    },
+)?;
+
+// Status report template
+let status = templates::status_report(
+    "Weekly Status",
+    "2025-01-01",
+    StatusContent {
+        summary: vec!["On track for Q1 goals"],
+        completed: vec!["Feature A released"],
+        in_progress: vec!["Feature B in testing"],
+        blocked: vec![],
+        next_week: vec!["Release Feature B"],
+        metrics: vec![("Velocity", "32 points")],
+    },
+)?;
+
+// Quick simple presentation
+let simple = templates::simple("My Presentation", &[
+    ("Introduction", &["Point 1", "Point 2"]),
+    ("Conclusion", &["Summary"]),
+])?;
+```
+
+Available templates: `business_proposal`, `training_material`, `status_report`, `technical_doc`, `simple`
+
+## Themes
+
+Pre-defined color palettes for shape styling, plus **embedded PPTX themes** that PowerPoint applies to new content:
+
+```rust
+use ppt_rs::prelude::themes;
+use ppt_rs::generator::{SlideContent, create_pptx_with_settings, PresentationSettings};
+use ppt_rs::{Presentation, PresentationTheme};
+
+let slide = SlideContent::new("Title").add_bullet("Point");
+
+// Embed a theme in the generated PPTX (theme1.xml)
+let pptx = Presentation::with_title("Branded Deck")
+    .add_slide(slide.clone())
+    .with_theme(PresentationTheme::corporate())
+    .into_bytes()?;  // consuming build — no slide clone
+
+// Or from a prelude preset
+let pptx = Presentation::with_title("Carbon Deck")
+    .add_slide(slide.clone())
+    .with_theme(themes::CARBON.to_presentation_theme())
+    .build()?;
+
+// Custom colors and fonts via settings
+let slides = vec![slide];
+let theme = PresentationTheme::modern()
+    .major_font("Georgia")
+    .minor_font("Verdana");
+let settings = PresentationSettings::new().theme(theme);
+let pptx = create_pptx_with_settings("Font Theme", &slides, Some(settings))?;
+```
+
+Prelude presets for shape colors: `themes::CORPORATE`, `MODERN`, `VIBRANT`, `DARK`, `NATURE`, `TECH`, `CARBON`. Convert any preset to an embedded theme with `.to_presentation_theme()`.
+
+Built-in `PresentationTheme` presets: `office()`, `corporate()`, `modern()`, `vibrant()`, `dark()`, `nature()`, `tech()`, `carbon()`. Build fully custom schemes with `ThemeColorScheme::from_palette()` or `PresentationTheme::new("Brand").colors(...)`.
+
+### Large Presentations
+
+For decks with 100+ slides, use lazy slide loading to generate on demand:
+
+```rust
+use ppt_rs::{create_pptx_lazy_to_writer, LazySlideSource, SlideContent};
+use std::fs::File;
+
+struct Deck { count: usize }
+impl LazySlideSource for Deck {
+    fn slide_count(&self) -> usize { self.count }
+    fn generate_slide(&self, i: usize) -> Option<SlideContent> {
+        Some(SlideContent::new(format!("Slide {}", i + 1)).add_bullet("Content"))
+    }
+}
+
+let file = File::create("large.pptx")?;
+create_pptx_lazy_to_writer(file, "Large Deck", Box::new(Deck { count: 500 }), None)?;
+```
+
+Profile generation with `ppt_rs::generator::memory_profile::{profile_eager_generation, profile_lazy_generation, sample_slides}`.
+
+Run Criterion benchmarks (eager/lazy generation + compression):
+
+```bash
+cargo bench
+# HTML report: target/criterion/report/index.html
+```
+
+### Extended Color Palettes
+
+```rust
+use ppt_rs::prelude::colors;
+
+// Basic colors
+colors::RED, colors::GREEN, colors::BLUE, colors::WHITE, colors::BLACK
+
+// Corporate colors
+colors::CORPORATE_BLUE, colors::CORPORATE_GREEN, colors::CORPORATE_RED
+
+// Material Design colors
+colors::MATERIAL_RED, colors::MATERIAL_BLUE, colors::MATERIAL_GREEN
+colors::MATERIAL_PURPLE, colors::MATERIAL_INDIGO, colors::MATERIAL_CYAN
+colors::MATERIAL_TEAL, colors::MATERIAL_LIME, colors::MATERIAL_AMBER
+
+// IBM Carbon Design colors
+colors::CARBON_BLUE_60, colors::CARBON_BLUE_40
+colors::CARBON_GRAY_100, colors::CARBON_GRAY_80, colors::CARBON_GRAY_20
+colors::CARBON_GREEN_50, colors::CARBON_RED_60, colors::CARBON_PURPLE_60
+```
+
+## Layout Helpers
+
+Position shapes easily with layout helpers:
+
+```rust
+use ppt_rs::prelude::layouts;
+
+// Center a shape on the slide
+let (x, y) = layouts::center(1000000, 500000);
+
+// Create a grid of positions
+let positions = layouts::grid(2, 3, 1000000, 800000); // 2x3 grid
+
+// Stack shapes horizontally
+let positions = layouts::stack_horizontal(4, 500000, 100000, 2000000);
+
+// Evenly distribute shapes
+let positions = layouts::distribute_horizontal(3, 500000, 2000000);
+```
+
+## Advanced Features
+
+- **Prelude Module**: Simplified API with macros (`pptx!`, `shape!`), unit helpers (`inches()`, `cm()`), and color constants
+- **Templates**: Pre-built presentation structures (business proposal, status report, training material, technical doc)
+- **Gradient Fills**: Linear gradients with multiple stops and directions (horizontal, vertical, diagonal, custom angle)
+- **Transparency**: Alpha transparency for solid fills (0-100%)
+- **Connectors**: Straight, elbow, curved with arrow types (triangle, stealth, diamond, oval, open) and dash styles
+- **Tables**: Cell formatting, colors, alignment, borders
+- **Charts**: Bar, line, pie, area, scatter, doughnut, radar, and more; editable in PowerPoint via embedded Excel workbook (v0.2.19)
+- **Shapes**: 100+ shape types with fills, outlines, and text
+- **Animations**: 50+ animation effects (fade, fly, zoom, etc.)
+- **Transitions**: 27 slide transition effects
+- **SmartArt**: 25 SmartArt layouts (lists, processes, cycles)
+- **Media**: Video and audio embedding (mp4, webm, mp3, wav)
+- **3D Models**: GLB, GLTF, OBJ, FBX, STL formats
+- **VBA Macros**: Support for .pptm files with macros
+- **Custom XML**: Embed custom data in presentations
+- **Themes**: Embedded color schemes and font definitions in `theme1.xml`
+- **Performance**: Lazy slide loading, borrow-based build, optimized package XML
+- **Speaker Notes**: Add notes to slides
+
+See [ARCHITECTURE.md](ARCHITECTURE.md) for detailed documentation.
+
+## License
+
+Apache-2.0
+
+## Contributing
+
+Contributions welcome! See [TODO.md](TODO.md) for current priorities.

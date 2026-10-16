@@ -1,0 +1,170 @@
+//! Additional content rendering (shapes, images, code blocks, connectors)
+
+use crate::generator::media::MediaRelIds;
+use crate::generator::shapes_xml::generate_shape_xml;
+use crate::generator::slide_content::SlideContent;
+
+/// Render additional content elements (shapes, images, code blocks, connectors, charts, ink, media)
+pub fn render_additional_content(
+    xml: &mut String,
+    content: &SlideContent,
+    chart_rids: &[String],
+    ink_rel_id: Option<&str>,
+    media_rids: &[MediaRelIds],
+) {
+    let extra_elements = content.shapes.len()
+        + content.images.len()
+        + content.code_blocks.len()
+        + content.connectors.len()
+        + content.charts.len().min(chart_rids.len())
+        + ink_rel_id.map_or(0, |_| 1)
+        + media_rids.len();
+    if extra_elements > 0 {
+        xml.reserve(extra_elements * 512);
+    }
+
+    // Render shapes - use shape's fixed ID if set, otherwise auto-assign
+    for (i, shape) in content.shapes.iter().enumerate() {
+        xml.push('\n');
+        let shape_id = shape.id.unwrap_or((i + 10) as u32);
+        xml.push_str(&generate_shape_xml(shape, shape_id));
+    }
+
+    // Render images (actual picture elements, not placeholders)
+    let image_start_id = 20 + content.shapes.len();
+    let image_rel_start = 2 + usize::from(content.notes.is_some());
+    for (i, image) in content.images.iter().enumerate() {
+        xml.push('\n');
+        let rel_id = image_rel_start + i;
+        xml.push_str(&crate::generator::images_xml::generate_image_xml(
+            image,
+            image_start_id + i,
+            rel_id,
+        ));
+    }
+
+    // Render code blocks with syntax highlighting
+    let code_start_id = 30 + content.shapes.len() + content.images.len();
+    for (i, code_block) in content.code_blocks.iter().enumerate() {
+        xml.push('\n');
+        xml.push_str(&generate_code_block(code_start_id + i, code_block));
+    }
+
+    // Render connectors
+    let connector_start_id =
+        50 + content.shapes.len() + content.images.len() + content.code_blocks.len();
+    for (i, connector) in content.connectors.iter().enumerate() {
+        xml.push('\n');
+        let id = connector_start_id + i;
+        xml.push_str(&crate::generator::connectors::generate_connector_xml(
+            connector, id,
+        ));
+    }
+
+    // Render charts
+    let chart_start_id = 100
+        + content.shapes.len()
+        + content.images.len()
+        + content.code_blocks.len()
+        + content.connectors.len();
+    for (i, chart) in content.charts.iter().enumerate() {
+        if i < chart_rids.len() {
+            xml.push('\n');
+            let r_id = &chart_rids[i];
+            xml.push_str(&crate::generator::charts::generate_chart_ref_xml(
+                chart,
+                r_id,
+                chart_start_id + i,
+            ));
+        }
+    }
+
+    // Render ink annotation reference
+    if let Some(rel_id) = ink_rel_id
+        && content.ink_annotations.is_some()
+    {
+        xml.push('\n');
+        xml.push_str(&format!(
+                r#"<mc:AlternateContent xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><mc:Choice Requires="p14"><p:contentPart xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:id="{}"/></mc:Choice></mc:AlternateContent>"#,
+                rel_id
+            ));
+    }
+
+    // Render video/audio elements (media_rids order: videos first, then audios)
+    let media_start_id = 150
+        + content.shapes.len()
+        + content.images.len()
+        + content.code_blocks.len()
+        + content.connectors.len();
+    let (mut video_idx, mut audio_idx) = (0usize, 0usize);
+    for (i, rids) in media_rids.iter().enumerate() {
+        xml.push('\n');
+        if rids.is_video {
+            if let Some(video) = content.videos.get(video_idx) {
+                xml.push_str(&crate::generator::media::generate_video_xml(
+                    video,
+                    media_start_id + i,
+                    rids,
+                ));
+            }
+            video_idx += 1;
+        } else if let Some(audio) = content.audios.get(audio_idx) {
+            xml.push_str(&crate::generator::media::generate_audio_xml(
+                audio,
+                media_start_id + i,
+                rids,
+            ));
+            audio_idx += 1;
+        }
+    }
+}
+
+/// Generate code block XML with syntax highlighting
+fn generate_code_block(
+    id: usize,
+    code_block: &crate::generator::slide_content::CodeBlock,
+) -> String {
+    // Use syntax highlighting when available, otherwise use plain text
+    #[cfg(feature = "syntect")]
+    let highlighted_xml =
+        crate::cli::syntax::generate_highlighted_code_xml(&code_block.code, &code_block.language);
+
+    #[cfg(not(feature = "syntect"))]
+    let highlighted_xml = {
+        // Fallback to basic XML without syntax highlighting
+        let escaped_code = code_block
+            .code
+            .replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;");
+        format!("<a:t>{}</a:t>", escaped_code)
+    };
+
+    let x = code_block.x;
+    let y = code_block.y;
+    let width = code_block.width;
+    let height = code_block.height;
+
+    format!(
+        r#"<p:sp>
+<p:nvSpPr>
+<p:cNvPr id="{id}" name="Code Block"/>
+<p:cNvSpPr txBox="1"/>
+<p:nvPr/>
+</p:nvSpPr>
+<p:spPr>
+<a:xfrm>
+<a:off x="{x}" y="{y}"/>
+<a:ext cx="{width}" cy="{height}"/>
+</a:xfrm>
+<a:prstGeom prst="rect"><a:avLst/></a:prstGeom>
+<a:solidFill><a:srgbClr val="002B36"/></a:solidFill>
+<a:ln w="12700"><a:solidFill><a:srgbClr val="073642"/></a:solidFill></a:ln>
+</p:spPr>
+<p:txBody>
+<a:bodyPr wrap="square" rtlCol="0" anchor="t" lIns="91440" tIns="45720" rIns="91440" bIns="45720"/>
+<a:lstStyle/>
+{highlighted_xml}</p:txBody>
+</p:sp>"#
+    )
+}

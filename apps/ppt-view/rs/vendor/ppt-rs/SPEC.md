@@ -1,0 +1,945 @@
+# PPTX-RS Specification
+
+## Overview
+
+`ppt-rs` is a Rust library for generating, reading, and modifying Microsoft PowerPoint 2007+ (.pptx) files following the ECMA-376 Office Open XML standard.
+
+## Design Philosophy
+
+### 1. Progressive Disclosure
+The library provides multiple API layers:
+- **Prelude** (`ppt_rs::prelude::*`) — Simple, discoverable API for common tasks
+- **Helpers** (`helpers::colors`, `helpers::tables`) — Convenient utilities for frequent operations
+- **Core** (`Shape`, `Table`, `Chart`) — Full control when needed
+
+### 2. Type Safety Over Convenience
+- All operations use `Result<T, PptxError>` for explicit error handling
+- Compile-time validation where possible (dimension units, color formats)
+- No panics in public API — all errors are recoverable
+
+### 3. Zero-Cost Abstractions
+- Helper functions and extension methods add no runtime overhead
+- Fluent APIs compile to the same code as direct construction
+- Lazy loading for large presentations without memory bloat
+
+### 4. OOXML Compliance
+- Generated files follow ECMA-376 standard exactly
+- Tested against Microsoft PowerPoint, LibreOffice, Google Slides
+- Preserves unknown elements when reading existing files (round-trip safe)
+
+## Testing Strategy
+
+The library employs a layered testing approach:
+
+| Test Type | Count | Purpose |
+|-----------|-------|---------|
+| Unit tests | 797 | Individual module correctness |
+| Integration tests | 513 | End-to-end workflows |
+| Compatibility tests | 6 | PowerPoint/LibreOffice/Google Slides validation |
+| Doc tests | 50+ | API examples in documentation |
+
+### Quality Gates
+- All tests must pass (100% required)
+- Zero compiler warnings
+- Clippy clean
+- Generated PPTX files validate against `PptxValidator`
+
+## API Stability
+
+### Semantic Versioning
+- **MAJOR**: Breaking changes to core API (rare)
+- **MINOR**: New features, backward compatible
+- **PATCH**: Bug fixes, documentation improvements
+
+### Current Stability
+- Core API (`Presentation`, `SlideContent`, `Shape`): Stable
+- Prelude API: Stable
+- Helper modules: Evolving (may add new convenience functions)
+- Internal traits (`ToXml`, `Positioned`): Subject to change
+
+### Deprecation Policy
+- Deprecated items marked with `#[deprecated(since = "x.y.z", note = "...")]`
+- Minimum 2 minor versions before removal
+- Migration guides in release notes
+
+## File Format Specification
+
+### PPTX Structure
+
+A PPTX file is a ZIP archive containing XML and binary files:
+
+```
+presentation.pptx
+├── [Content_Types].xml      # MIME type declarations
+├── _rels/
+│   └── .rels               # Package relationships
+├── ppt/
+│   ├── presentation.xml    # Main presentation
+│   ├── _rels/
+│   │   └── presentation.xml.rels
+│   ├── slides/             # Individual slides
+│   ├── slideLayouts/       # Layout templates
+│   ├── slideMasters/       # Master slides
+│   ├── theme/              # Theme definitions
+│   ├── media/              # Images, videos, audio
+│   ├── charts/             # Embedded charts
+│   └── notesSlides/        # Speaker notes
+└── docProps/
+    ├── core.xml            # Document properties
+    └── app.xml             # Application properties
+```
+
+### XML Namespaces
+
+| Prefix | Namespace URI | Usage |
+|--------|--------------|-------|
+| `a` | `http://schemas.openxmlformats.org/drawingml/2006/main` | Drawing ML |
+| `p` | `http://schemas.openxmlformats.org/presentationml/2006/main` | Presentation ML |
+| `r` | `http://schemas.openxmlformats.org/officeDocument/2006/relationships` | Relationships |
+| `c` | `http://schemas.openxmlformats.org/drawingml/2006/chart` | Charts |
+
+### Units
+
+The library uses EMU (English Metric Units) internally:
+
+| Unit | EMU Value |
+|------|-----------|
+| 1 inch | 914,400 EMU |
+| 1 cm | 360,000 EMU |
+| 1 point | 12,700 EMU |
+| 1 mm | 36,000 EMU |
+
+## API Specification
+
+### Prelude Module
+
+The prelude provides a simplified API:
+
+```rust
+use ppt_rs::prelude::*;
+
+// Macros
+pptx!("Title")                    // Create QuickPptx builder
+shape!(rect x, y, w, h)           // Create rectangle shape
+shape!(circle x, y, size)         // Create circle shape
+
+// Unit Conversions
+inches(1.0) -> 914400             // Convert inches to EMU
+cm(2.54) -> 914400                // Convert cm to EMU
+pt(72.0) -> 914400                // Convert points to EMU
+
+// Shape Builders
+shapes::rect(x, y, w, h)          // Rectangle (inches)
+shapes::circle(x, y, d)           // Circle (inches)
+shapes::rounded_rect(x, y, w, h)  // Rounded rectangle
+shapes::text_box(x, y, w, h, text)// Text box
+shapes::colored(shape, fill, line)// Apply colors
+shapes::gradient(shape, start, end, dir)// Apply gradient
+
+// Color Constants
+colors::RED, colors::BLUE, colors::GREEN
+colors::CORPORATE_BLUE, colors::CORPORATE_GREEN
+```
+
+### Core Types
+
+#### SlideContent
+
+```rust
+SlideContent::new("Title")
+    .add_bullet("Text")           // Add bullet point
+    .notes("Speaker notes")       // Add speaker notes
+    .layout(SlideLayout::TwoColumn) // Set layout
+    .table(table)                 // Add table
+    .with_shapes(shapes)          // Add shapes
+    .add_image(image)             // Add image
+    .add_chart(chart)             // Add chart
+```
+
+#### SlideLayout
+
+Each variant maps to `slideLayoutN.xml` on slide master 1 (see `layout_number()`).
+
+| Layout | # | Description |
+|--------|---|-------------|
+| `CenteredTitle` | 1 | Centered title + subtitle |
+| `TitleAndContent` | 2 | Title with bullets (default) |
+| `TwoColumn` | 3 | Two-column layout |
+| `SectionHeader` | 4 | Section divider (large title) |
+| `Blank` | 5 | Empty slide |
+| `TitleOnly` | 6 | Title at top only |
+| `TitleAndBigContent` | 7 | Title at top, content fills rest |
+
+`STANDARD_LAYOUT_COUNT` (7) layouts are emitted on slide master 1. Each layout's title and body shapes emit `<p:ph type="..."/>` so PowerPoint recognizes them as filling the layout's intended slots (v0.2.36 follow-up; python-pptx parity — `slide.shapes.title` finds the title shape because of this XML).
+
+#### Shape
+
+```rust
+Shape::new(ShapeType::Rectangle, x, y, width, height)
+    .with_fill(ShapeFill::new("FF0000"))
+    .with_line(ShapeLine::new("000000", 12700))
+    .with_text("Text")
+    .with_gradient(GradientFill::linear("start", "end", direction))
+    .with_transparency(50)
+    .with_id(id)                  // Fixed ID for connectors
+```
+
+#### ShapeType (100+ types)
+
+| Category | Types |
+|----------|-------|
+| Basic | Rectangle, Circle, Ellipse, Triangle, Diamond |
+| Arrows | ArrowRight, ArrowLeft, ArrowUp, ArrowDown, etc. |
+| Stars | Star4, Star5, Star6, Star8, Star12, Star16, Star24, Star32 |
+| Callouts | RoundedRectCallout, WedgeCallout, CloudCallout |
+| Flowchart | Process, Decision, Data, Document, Terminator |
+| Other | Heart, Lightning, Moon, Sun, Cloud |
+
+#### Connector
+
+```rust
+Connector::straight(x1, y1, x2, y2)
+Connector::elbow(x1, y1, x2, y2)
+Connector::curved(x1, y1, x2, y2)
+    .with_line(ConnectorLine::new("color", width))
+    .with_end_arrow(ArrowType::Triangle)
+    .with_start_arrow(ArrowType::Oval)
+    .with_arrow_size(ArrowSize::Large)
+    .anchored_to(start_shape_id, end_shape_id)
+```
+
+#### Table
+
+```rust
+TableBuilder::new(vec![col_widths])
+    .add_simple_row(vec!["Cell 1", "Cell 2"])
+    .add_row(TableRow::new(vec![
+        TableCell::new("Text")
+            .bold()
+            .italic()
+            .text_color("FFFFFF")
+            .background_color("4472C4")
+            .align(CellAlign::Center)
+            .valign(CellVAlign::Middle)
+    ]))
+    .position(x, y)
+    .build()
+```
+
+#### Chart
+
+```rust
+ChartBuilder::new("Title", ChartType::Bar)
+    .categories(vec!["Q1", "Q2", "Q3"])
+    .add_series(ChartSeries::new("2023", vec![100.0, 150.0, 120.0]))
+    .build()
+```
+
+| Chart Type | Description |
+|------------|-------------|
+| `Bar` | Vertical bar chart |
+| `BarClustered` | Clustered bar chart |
+| `BarStacked` | Stacked bar chart |
+| `Line` | Line chart |
+| `LineSmooth` | Smooth line chart |
+| `Pie` | Pie chart |
+| `Pie3D` | 3D pie chart |
+| `Doughnut` | Doughnut chart |
+| `Area` | Area chart |
+| `AreaStacked` | Stacked area chart |
+| `Scatter` | Scatter plot |
+| `Radar` | Radar chart |
+| `Bubble` | Bubble chart |
+
+#### GradientFill
+
+```rust
+GradientFill::linear("start_color", "end_color", GradientDirection::Horizontal)
+GradientFill::three_color("start", "middle", "end", direction)
+GradientFill::custom(vec![
+    GradientStop::new("color1", 0, 0),    // position 0%, transparency 0%
+    GradientStop::new("color2", 50, 25),  // position 50%, transparency 25%
+    GradientStop::new("color3", 100, 0),  // position 100%, transparency 0%
+], angle)
+```
+
+| Direction | Angle |
+|-----------|-------|
+| Horizontal | 0° |
+| Vertical | 90° |
+| DiagonalDown | 45° |
+| DiagonalUp | 135° |
+| Angle(n) | n° |
+
+#### Image Effects (v0.2.10)
+
+**Simplified API** - Chainable methods with auto-detection:
+
+```rust
+use ppt_rs::generator::ImageBuilder;
+use ppt_rs::prelude::inches;
+
+// Simple: Load from file (auto-detects format)
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(1.0), inches(2.0))
+    .build();
+
+// Auto-detect format from bytes
+let img = ImageBuilder::auto(bytes)
+    .at(inches(2.0), inches(3.0))
+    .build();
+
+// Chainable effects
+let img = ImageBuilder::from_file("photo.jpg")
+    .at(inches(1.0), inches(2.0))
+    .shadow()           // Add shadow
+    .reflection()       // Add reflection
+    .glow()            // Add glow
+    .build();
+
+// With sizing and cropping
+let img = ImageBuilder::from_file("photo.jpg")
+    .size(inches(3.0), inches(2.0))
+    .at(inches(2.0), inches(3.0))
+    .crop(0.1, 0.1, 0.1, 0.1)  // 10% crop from all sides
+    .build();
+```
+
+**Legacy API** - Still supported:
+
+```rust
+// Explicit width/height/format
+ImageBuilder::from_bytes(bytes, 2000000, 2000000, "JPEG")
+    .position(500000, 1500000)
+    .build_with_shadow()
+
+// Base64 with explicit parameters
+ImageBuilder::from_base64(data, 2000000, 2000000, "PNG")
+    .position(800000, 1200000)
+    .build_with_reflection()
+```
+
+| Effect | Description | OOXML Element |
+|--------|-------------|---------------|
+| Shadow | Outer drop shadow with blur and offset | `<a:outerShdw>` |
+| Reflection | Mirror effect below image | `<a:reflection>` |
+| Glow | Golden aura around image | `<a:glow>` |
+| Soft Edges | Feathered/vignette borders | `<a:softEdge>` |
+| Inner Shadow | Inset shadow for depth | `<a:innerShdw>` |
+| Blur | Artistic defocus effect | `<a:blur>` |
+| Crop | Percentage-based edge trimming | `<a:srcRect>` |
+
+**Supported Image Formats:**
+- JPEG/JPG - Full support with all effects
+- PNG - Full support with all effects
+- GIF - Basic support
+
+### HTML to PPTX
+
+The CLI and library convert HTML to PowerPoint:
+
+```bash
+pptcli html2ppt input.html [output.pptx] [--title "Title"] [options]
+```
+
+#### Supported HTML Elements
+
+| HTML | PPTX Result |
+|------|-------------|
+| `<h1>` | New slide with title |
+| `<h2>`–`<h6>` | Bold section headers |
+| `<p>` | Bullet points / paragraphs |
+| `<ul>`/`<ol>` with `<li>` | List items |
+| `<table>` with `<tr>`/`<th>`/`<td>` | Table with styled header row |
+| `<pre>`/`<code>` | Code blocks |
+| `<img>` | Real image embedding (local files & web URLs) |
+| `<blockquote>` | Speaker notes |
+| `<strong>`/`<b>` | Bold text |
+| `<em>`/`<i>` | Italic text |
+| `<a href="...">` | Hyperlink preservation and handling |
+| `<hr>` | Slide break |
+| `<br>` | Line break |
+| `<title>` | Presentation title (falls back to first `<h1>`) |
+
+#### Inline CSS Support (Enhanced v0.2.14)
+
+**Text Styling:**
+- `color` — Text color (named, hex `#RRGGBB`, `rgb()`, `rgba()`)
+- `font-size` — Font size in px/pt
+- `font-weight` — Bold (700+)
+- `font-style` — Italic
+- `text-align` — left, center, right
+- `background-color` — Text highlight / background
+
+**Layout & Spacing (NEW):**
+- `margin` — Outer spacing (top, right, bottom, left)
+- `padding` — Inner spacing (top, right, bottom, left)
+- `line-height` — Line spacing multiplier
+- `letter-spacing` — Character spacing
+
+**Borders & Effects (NEW):**
+- `border` — Border width, style, and color
+- `border-radius` — Rounded corners
+- `opacity` — Transparency level
+
+**Advanced (NEW):**
+- Font family and fallback support
+- Enhanced color parsing with named colors
+- Style inheritance and cascade
+- Complex selector combinations
+
+#### API
+
+```rust
+use ppt_rs::import::{parse_html, parse_html_with_options, Html2Ppt, HtmlParseOptions};
+
+// Quick parse
+let slides = parse_html(html)?;
+
+// With options
+let options = HtmlParseOptions::new()
+    .max_slides(20)
+    .max_bullets(8)
+    .include_code(true)
+    .include_tables(true)
+    .include_images(false);
+
+let slides = Html2Ppt::with_options(options).parse(html)?;
+
+// Parse from file
+let slides = Html2Ppt::new().parse_file("page.html")?;
+```
+
+#### CLI Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--title` | HTML `<title>` | Presentation title override |
+| `--max-slides` | 50 | Maximum slides to generate |
+| `--max-bullets` | 10 | Maximum bullet points per slide |
+| `--no-images` | false | Disable image placeholders |
+| `--no-tables` | false | Disable table extraction |
+| `--no-code` | false | Disable code block extraction |
+
+### Markdown to PPTX
+
+The CLI converts Markdown to PPTX:
+
+```bash
+pptcli md2ppt input.md [output.pptx] [--title "Title"]
+```
+
+#### Supported Markdown Syntax
+
+| Syntax | Result |
+|--------|--------|
+| `# Heading` | New slide with title |
+| `## Subheading` | Bold bullet point |
+| `- Bullet` | Bullet point |
+| `- [x] Task` | Task list with completed checkbox |
+| `- [ ] Todo` | Task list with uncompleted checkbox |
+| `1. Item` | Numbered list |
+| `**bold**` | Bold text |
+| `*italic*` | Italic text |
+| `~~strikethrough~~` | Strikethrough text |
+| `` `code` `` | Inline code |
+| `> Quote` | Speaker notes |
+| `\| Table \|` | GFM table |
+| ` ```code``` ` | Syntax-highlighted code |
+| ` ```mermaid ` | Mermaid diagram |
+| `
+![Image](url)
+` | Real image embedding (local & web URLs) |
+| `---` | Slide break |
+
+#### Syntax Highlighting
+
+Code blocks use Solarized Dark theme:
+
+| Element | Color |
+|---------|-------|
+| Keywords | Blue (#268BD2) |
+| Functions | Yellow (#B58900) |
+| Strings | Cyan (#2AA198) |
+| Operators | Green (#859900) |
+| Numbers | Violet (#6C71C4) |
+| Comments | Gray (#586E75) |
+
+#### Mermaid Diagrams (12 types)
+
+| Type | Description |
+|------|-------------|
+| `flowchart` | Flowchart with nodes and edges |
+| `sequenceDiagram` | Sequence diagram with participants |
+| `pie` | Pie chart |
+| `gantt` | Gantt chart with tasks |
+| `classDiagram` | UML class diagram |
+| `stateDiagram` | State machine diagram |
+| `erDiagram` | Entity-relationship diagram |
+| `mindmap` | Mind map |
+| `timeline` | Timeline |
+| `journey` | User journey map |
+| `quadrantChart` | Quadrant chart |
+| `gitGraph` | Git commit graph |
+
+### Repair Capability
+
+```rust
+use ppt_rs::oxml::repair::{PptxRepair, RepairIssue, RepairResult};
+
+let mut repair = PptxRepair::open("file.pptx")?;
+let issues = repair.validate();
+let result = repair.repair();
+if result.is_valid {
+    repair.save("repaired.pptx")?;
+}
+```
+
+#### Detectable Issues
+
+- Missing required parts
+- Invalid XML structure
+- Broken relationships
+- Orphan slides
+- Invalid content types
+
+### Reading & Editing
+
+```rust
+use ppt_rs::oxml::{ParagraphEdit, PresentationReader, PresentationEditor};
+
+// Read presentation info
+let reader = PresentationReader::open("file.pptx")?;
+let info = reader.presentation_info()?;
+println!("Slides: {}", info.slide_count);
+
+// Extract per-slide text from raw bytes (no XML details leak to caller)
+let bytes: Vec<u8> = std::fs::read("file.pptx")?;
+let slides: Vec<Vec<String>> = ppt_rs::extract_slide_texts_from_bytes(&bytes)?;
+for (i, paragraphs) in slides.iter().enumerate() {
+    println!("slide {i}: {} text fragments", paragraphs.len());
+}
+
+// Edit presentation
+let mut editor = PresentationEditor::open("file.pptx")?;
+editor.add_slide(SlideContent::new("New Slide"))?;
+editor.update_slide(0, SlideContent::new("Updated"))?;
+editor.remove_slide(1)?;
+editor.save("modified.pptx")?;
+
+// TextFrame runtime editing (python-pptx parity)
+assert!(editor.shape_has_text_frame(0, 0).unwrap());   // title shape has text
+editor.set_title_text(0, "Edited Title").unwrap();     // replace all paragraphs
+editor.add_paragraph(0, 1, "New bullet").unwrap();    // append
+editor.add_paragraph_with_format(
+    0, 1,
+    ParagraphEdit::new("Nested")
+        .with_level(1)
+        .with_bold(true)
+        .with_font_size(24),
+).unwrap();
+let paragraphs: Vec<String> = editor.shape_paragraphs(0, 1).unwrap();
+```
+
+### Export to HTML (Enhanced v0.2.14)
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::export::html::{export_to_html_with_options, HtmlExportOptions};
+
+let pres = Presentation::with_title("My Presentation")
+    .add_slide(SlideContent::new("Slide 1").add_bullet("Point"));
+
+// Simple export
+pres.save_as_html("output.html")?;
+
+// Enhanced export with interactive features
+let options = HtmlExportOptions::new()
+    .with_navigation(true)      // Previous/Next buttons
+    .with_notes(true)           // Include speaker notes
+    .with_syntax_highlight(true) // Code highlighting
+    .with_fullscreen(true);     // Fullscreen support
+
+let html = export_to_html_with_options(&pres, &options)?;
+std::fs::write("enhanced.html", html)?;
+```
+
+**Enhanced HTML Export Features (v0.2.14):**
+- **Interactive Navigation**: Previous/Next buttons with keyboard shortcuts
+- **Keyboard Controls**: Arrow keys, Space, Home, End, F for fullscreen
+- **Touch Support**: Swipe gestures for mobile devices
+- **Speaker Notes**: Toggleable notes panel with slide content
+- **Syntax Highlighting**: Code blocks with proper formatting
+- **Responsive Design**: Mobile-friendly layout and controls
+
+### Export to Markdown (v0.2.12)
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::export::md::MarkdownOptions;
+
+let pres = Presentation::with_title("My Presentation")
+    .add_slide(SlideContent::new("Slide 1").add_bullet("Point"));
+
+// Simple export
+pres.save_as_markdown("output.md")?;
+
+// With options
+let options = MarkdownOptions::new()
+    .with_slide_numbers(true)
+    .with_frontmatter(true)
+    .with_gfm_tables(true)
+    .with_notes(true);
+pres.save_as_markdown_with_options("output.md", &options)?;
+```
+
+**Markdown Export Features:**
+- YAML frontmatter with presentation metadata
+- GFM tables for slide tables
+- Code blocks with syntax highlighting
+- Speaker notes as blockquotes
+- Configurable slide separators
+- Image references
+
+### Export to Images (v0.2.12)
+
+No LibreOffice required: slides are rendered to PDF with the pure-Rust
+`pdfrs` engine and rasterized with `pdftoppm` (poppler).
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::export::image_export::{ImageExportOptions, ImageFormat};
+
+let pres = Presentation::with_title("My Presentation")
+    .add_slide(SlideContent::new("Slide 1"))
+    .add_slide(SlideContent::new("Slide 2"));
+
+// Export all slides
+let options = ImageExportOptions::new()
+    .with_format(ImageFormat::Png)
+    .with_dpi(150);
+let paths = pres.save_as_images("output_dir/", &options)?;
+
+// Export single slide
+let options = ImageExportOptions::new()
+    .with_format(ImageFormat::Png)
+    .with_slide(1);
+pres.save_slide_as_image(1, "slide1.png", &options)?;
+
+// Generate thumbnail
+pres.save_thumbnail("thumbnail.png", 300)?;
+```
+
+**Image Export Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `format` | PNG | PNG or JPEG |
+| `dpi` | 150 | Resolution (96-300+) |
+| `jpeg_quality` | 90 | JPEG quality (0-100) |
+| `width/height` | 0 | Dimensions in pixels (0 = auto) |
+| `slide_number` | 0 | 0 = all, 1+ = specific |
+
+**Presets:**
+- `ImageExportOptions::high_quality()` — 300 DPI PNG
+- `ImageExportOptions::web_optimized()` — 96 DPI JPEG
+
+### Export to PDF (v0.2.23, pure-Rust)
+
+Pure-Rust PDF export via `pdfrs` — no LibreOffice dependency. Enable with the `pdf-native` feature (default on).
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::export::pdf_export::{PdfExportOptions, PdfOrientation};
+
+let pres = Presentation::with_title("My Presentation")
+    .add_slide(SlideContent::new("Slide 1"));
+
+// File path
+let options = PdfExportOptions::new().with_orientation(PdfOrientation::Landscape);
+pres.save_as_pdf_via_pdfrs("output.pdf", &options)?;
+
+// In-memory bytes
+let bytes = pres.to_pdf_bytes(&options)?;
+```
+
+**PDF Export Options:**
+| Option | Default | Description |
+|--------|---------|-------------|
+| `orientation` | Portrait | `PdfOrientation::Portrait` / `Landscape` |
+
+### Compression (v0.2.12)
+
+```rust
+use ppt_rs::api::Presentation;
+use ppt_rs::opc::compress::CompressionOptions;
+
+let pres = Presentation::with_title("Large Presentation")
+    .add_slide(SlideContent::new("Slide 1"));
+
+// Analyze file size
+let analysis = pres.analyze_size()?;
+println!("{}", analysis.summary());
+
+// Compress with default options
+let options = CompressionOptions::new();
+let result = pres.compress("compressed.pptx", &options)?;
+println!("Reduced by {:.1}%", result.reduction_percent);
+
+// Use web optimization preset
+let options = CompressionOptions::web();
+let result = pres.compress("web_optimized.pptx", &options)?;
+```
+
+**Compression Features:**
+| Feature | Description |
+|---------|-------------|
+| Remove unused media | Deletes unreferenced images/audio |
+| Remove properties | Strips document metadata |
+| Remove notes | Deletes speaker notes slides |
+| Remove comments | Deletes presentation comments |
+| XML optimization | Minimizes whitespace |
+| Target size | Optimize until size reached |
+
+**Compression Levels:**
+| Level | Image Quality | Max Dimension | Use Case |
+|-------|--------------|---------------|----------|
+| Light | 95% | 2048px | Minimal change |
+| Medium | 85% | 1600px | Balanced |
+| Aggressive | 70% | 1280px | Maximum reduction |
+| Custom(n) | n% | 1600px | User defined |
+
+**Presets:**
+- `CompressionOptions::maximum()` — All aggressive optimizations
+- `CompressionOptions::web()` — 5MB target, web-ready
+
+### Templates & Slide Layouts (v0.2.19)
+
+Clone masters, theme, layouts, and table styles from an existing `.pptx` template, and pick a layout per slide:
+
+```rust
+use ppt_rs::generator::{create_pptx_with_template, SlideContent, PresentationSettings, create_pptx_with_settings};
+use ppt_rs::SlideLayout;
+
+let slides = vec![
+    SlideContent::new("Cover").with_layout(SlideLayout::CenteredTitle),
+    SlideContent::new("Body").with_layout(SlideLayout::TitleAndContent),
+];
+
+// Dedicated helper
+let pptx = create_pptx_with_template("Deck", &slides, "brand.pptx", None)?;
+
+// Or via settings
+let settings = PresentationSettings::new().template("brand.pptx");
+let pptx = create_pptx_with_settings("Deck", &slides, Some(settings))?;
+```
+
+`PptxTemplate::load(path)` / `from_package(&pkg)` extract the template parts; `resolve_layout_number()` falls back to layout 1 when a template has fewer layouts than requested.
+
+CLI: `pptcli create output.pptx --title "Title" --slides 8 --template brand.pptx`
+
+### Review Comments
+
+Attach review comments to slides; authors are presentation-wide and referenced by id:
+
+```rust
+use ppt_rs::{Presentation, SlideContent};
+
+let mut pres = Presentation::new().title("Review");
+let alice = pres.add_comment_author("Alice", "AR"); // → ppt/commentAuthors.xml
+
+let pres = pres.add_slide(
+    SlideContent::new("Draft")
+        .add_bullet("Point")
+        .add_comment(alice, "Fix wording", 500_000, 300_000), // x/y in EMU
+);
+// Packages ppt/comments/comment1.xml + slide rel (…/relationships/comments)
+```
+
+### Video & Audio Embedding
+
+Embed media files from disk; PowerPoint needs two relationships per element
+(`…/relationships/video|audio` for `r:link`, `…/relationships/media` for the
+`p14:media r:embed` extension) plus a poster-frame image:
+
+```rust
+use ppt_rs::generator::{SlideContent, Video, VideoFormat, Audio, AudioFormat};
+
+let video = Video::new("clip.mp4", VideoFormat::Mp4, 1_000_000, 500_000, 4_000_000, 3_000_000)
+    .with_poster("poster.png"); // optional; built-in 1×1 placeholder otherwise
+let audio = Audio::new("narration.mp3", AudioFormat::Mp3, 500_000, 4_500_000, 1_000_000, 1_000_000);
+
+let slide = SlideContent::new("Demo").add_video(video).add_audio(audio);
+// Packages ppt/media/media1.mp4, ppt/media/media2.mp3 + content-type Defaults
+```
+
+Sources are file paths (read at generation time; unreadable or unsupported
+extensions are errors). Default `remove_unused_media` compression keeps media
+referenced from slide rels.
+
+### Slide Sections
+
+Group slides into named sections; emitted as `<p14:sectionLst>` in
+`presentation.xml` and usable by section-aware export:
+
+```rust
+let pres = Presentation::new()
+    .title("Report")
+    .add_section("Intro", 0, 2)?    // slides [0, 2), 0-based; overlap-checked
+    .add_section("Results", 2, 3)?
+    .add_slide(SlideContent::new("Welcome"));
+
+// Markdown: opt-in grouping ("## Intro" headings, slide headers become ###)
+let md = export_to_markdown_with_options(&pres, &MarkdownOptions::new().with_section_grouping(true))?;
+
+// HTML: opt-in per-slide section labels
+let html = export_to_html_with_options(&pres, &HtmlExportOptions::new().with_section_grouping(true))?;
+```
+
+`Presentation::from_path` preserves sections parsed from `<p14:sectionLst>`
+in `presentation.xml`.
+
+CLI: `pptcli export deck.pptx out.html --group-by-sections`
+
+MCP `export_pptx` accepts optional `group_by_sections: true` when
+`format` is `markdown` or `html`.
+
+### Package Validation (v0.2.19)
+
+Structured structural validation of any PPTX byte stream (the same engine the generator self-checks in debug builds):
+
+```rust
+use ppt_rs::{validate_package_bytes, ValidationSeverity};
+
+let bytes = std::fs::read("presentation.pptx")?;
+let report = validate_package_bytes(&bytes);
+for issue in &report.issues {
+    println!("[{:?}] {:?}: {}", issue.severity, issue.category, issue.message);
+}
+assert!(report.is_valid()); // true when no Error-severity findings
+```
+
+| Export | Purpose |
+|--------|---------|
+| `validate_package(archive)` | Validate an open `ZipArchive` |
+| `validate_package_bytes(&[u8])` | Validate a PPTX byte slice |
+| `PackageValidationReport` | Aggregated findings (`is_valid`, `error_count`, `error_messages`) |
+| `PackageValidationIssue` | Single finding: `category`, `severity`, `message`, `path` |
+| `ValidationCategory` | MissingPart, Relationship, ContentType, Presentation, SlideMaster, Slide, Chart, Xml, Theme |
+| `ValidationSeverity` | Warning, Error |
+| `REQUIRED_PACKAGE_PARTS` | Constant list of mandatory package parts |
+| `validate_powerpoint_structure()` / `CompatReport` | Legacy wrapper (delegates to package validation) |
+
+## CLI Commands
+
+```bash
+pptcli create <output.pptx> [--title "T"] [--slides N] [--template deck.pptx]  # Create presentation
+pptcli md2ppt <input.md> [output.pptx] [--title]    # Convert markdown (aliases: from-md, from-markdown)
+pptcli html2ppt <input.html> [output.pptx] [--title] # Convert HTML (aliases: from-html, from-html-file)
+pptcli pdf2ppt <input.pdf> [output.pptx]             # Convert PDF (requires pdftoppm)
+pptcli validate <file.pptx> [--json]                 # Validate PPTX (structured issues)
+pptcli diff <old.pptx> <new.pptx> [--json]           # Semantic slide-level diff (CI-friendly)
+pptcli batch <input_dir> <output_dir> [--template]   # Batch MD/HTML → one .pptx per file
+pptcli info <file.pptx>                              # Show info
+pptcli export <input.pptx> <output> [--format pdf|html|md|png] [--group-by-sections]  # Export to PDF/HTML/Markdown/PNG
+pptcli merge [-o output.pptx] <input1.pptx> <input2.pptx> [more...]  # Merge presentations
+pptcli web2ppt <url> [-o output.pptx] [--web2md]             # Webpage→PPTX (requires --features web2ppt; --web2md requires --features web2md)
+```
+
+Repair is available as a library API (`oxml::repair::PptxRepair`) and as the
+MCP `repair_pptx` tool; there is no dedicated `pptcli repair` subcommand.
+
+## HTTP API (`http` feature)
+
+Run: `cargo run --features http --bin ppt_http [--host HOST] [--port PORT]` (default `127.0.0.1:8080`).
+
+| Method | Path | Body | Response |
+|--------|------|------|----------|
+| GET | `/health` | — | JSON `{ status, version }` |
+| POST | `/v1/generate` | JSON `{ title, slides: [{ title, bullets }] }` | `.pptx` bytes |
+| POST | `/v1/markdown` | JSON `{ markdown, title? }` | `.pptx` bytes |
+| POST | `/v1/validate` | raw `.pptx` | JSON validation report |
+| POST | `/v1/export/markdown` | raw `.pptx` | Markdown text (`?group_by_sections=true`) |
+| POST | `/v1/export/html` | raw `.pptx` | HTML text (`?group_by_sections=true`) |
+| POST | `/v1/diff` | JSON `{ old_pptx, new_pptx }` (base64) | JSON semantic diff |
+
+## Compatibility
+
+| Application | Status |
+|-------------|--------|
+| Microsoft PowerPoint 2007+ | ✅ Full support |
+| LibreOffice Impress | ✅ Full support |
+| Google Slides | ✅ Full support |
+| Apple Keynote | ✅ Import support |
+| WPS Office | ✅ Full support |
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| File size overhead | ~10-15 KB base |
+| Generation speed | ~1000 slides/sec |
+| Memory usage | ~2 MB + content |
+| Test coverage | 1310 tests |
+
+## Error Handling
+
+```rust
+use ppt_rs::{PptxError, Result};
+
+// All operations return Result<T, PptxError>
+match create_pptx("title", 5) {
+    Ok(data) => { /* success */ }
+    Err(PptxError::Io(e)) => { /* I/O error */ }
+    Err(PptxError::Zip(e)) => { /* ZIP error */ }
+    Err(PptxError::XmlParse(e)) => { /* XML error */ }
+    Err(PptxError::InvalidOperation(msg)) => { /* logic error */ }
+}
+```
+
+## Version History
+
+| Version | Features | Significance |
+|---------|----------|--------------|
+| 0.2.36 | Clippy `--all-features --all-targets -D warnings` green (lib + bins + tests + examples); `useless_vec` → array literals in CLI tests, `len_zero` → `!is_empty()` in markdown tests, `ptr_arg` (`&PathBuf` → `&Path`) in media tests; `extract_slide_texts_from_bytes(&bytes)` per-slide text helper, `PresentationReader::open_bytes(&[u8])` byte-buffer import; **layout placeholder XML** — generated slides now emit `<p:ph type="title"/>` / `<p:ph type="body" idx="N"/>` so PowerPoint recognizes the title/body as filling the layout's intended slots (python-pptx parity); **TextFrame runtime editing API** — `PresentationEditor::shape_has_text_frame` / `set_shape_text` / `add_paragraph` / `add_paragraph_with_format` / `set_title_text` / `shape_paragraphs` + `ParsedShape::has_text_frame()` predicate (python-pptx `tf.text = …` / `tf.add_paragraph()` / `p.level` / `p.font.bold` parity; **Chart customization** — `ChartBuilder::legend(LegendConfig)` (show/position), `value_axis` / `category_axis` (AxisConfig — min/max/major_unit/minor_unit/log_scale/number_format/tick_label_size_pt/tick_label_bold/tick_label_rotation_deg), `data_labels(DataLabelsConfig)` (show_value/show_category_name/show_percentage/show_series_name/position) — python-pptx + pptxgenjs parity (full axis/label/legend control) | **Chart milestone** — every chart ships tunable: legend (show/position), axes (min/max/log scale/number format/rotation), data labels (show value/percentage/category name + position); `validate_package_bytes` regression guard on top |
+| 0.2.35 | Comment import — `PresentationReader::comment_authors()` / `slide_comments()` wired through `import_pptx` for full comments round-trip | **Round-trip milestone** — review comments survive import and re-export |
+| 0.2.34 | REST/HTTP API (`http` feature, `ppt_http` binary) — `/health`, `/v1/generate`, `/v1/markdown`, `/v1/validate`, `/v1/export/*`, `/v1/diff` | **Deployment milestone** — headless HTTP access for SaaS/automation without MCP |
+| 0.2.33 | CLI markdown export (`--format md`, `.md` extension) + `--group-by-sections` for Markdown; MCP `diff_pptx` tool with optional JSON report | **Tooling parity milestone** — export/diff surfaces aligned across CLI and MCP |
+| 0.2.32 | Criterion benchmark suite (`benches/pptx_benchmarks.rs`) — eager/lazy generation + compression at 10/50/100 slides; `cargo bench` | **Performance milestone** — reproducible regression tracking for core hot paths |
+| 0.2.31 | Batch pipeline API (`pipeline::run_directory`, `run_batch`, `BatchOptions`) + `pptcli batch` — directory of MD/HTML → deck-per-file with shared theme/template | **Automation milestone** — bulk deck generation for docs/content pipelines |
+| 0.2.30 | Semantic diff (`compare_presentations`, `compare_pptx_paths`, `pptcli diff [--json]`) — slide-level title/bullets/images/charts/tables/media | **CI/review milestone** — compare decks without byte-level diff |
+| 0.2.29 | Section import (`PresentationReader::sections()` → `from_path`), CLI `export --group-by-sections` for HTML | **Round-trip milestone** — sections survive import; all export surfaces expose grouping |
+| 0.2.28 | `remove_comments` compression wired (parts + rels + content-types), MCP `export_pptx` `group_by_sections` flag, `save_as_html_with_options` API | **Gap-fill milestone** — closes documented compression/MCP/API drift from v0.2.27 |
+| 0.2.27 | Comments round-trip (`add_comment` / `add_comment_author`), video & audio embedding (`add_video` / `add_audio` with dual rels + poster frames), section-aware export (`add_section` → `<p14:sectionLst>`), lazy content-types append fix, pure-Rust image export (pdfrs + pdftoppm) | **Content & round-trip milestone** — review comments, media, and sections packaged with validation; image export without LibreOffice |
+| 0.2.26 | Chart build-time validation (`ChartBuilder::build()` → `Result<Chart>`), MCP tool expansion (+3: `compress_pptx`, `repair_pptx`, `apply_theme` = 11 total), rmcp 2.2.0 API migration, `MEMORY.md` institutional knowledge repository | **Validation & MCP milestone** — charts fail fast on bad data; MCP covers full compress/repair/theme lifecycle |
+| 0.2.25 | Dependency updates, URL validation simplification in `web2ppt/fetcher.rs` | Maintenance — keep dependency tree current and streamline fetcher validation |
+| 0.2.24 | `web2md` bridge: HTML→Markdown→Slides pipeline via `web2md` crate, `--web2md` CLI flag, `url_to_pptx_via_web2md` / `html_to_pptx_via_web2md` | **Conversion milestone** — alternate HTML ingestion path through Markdown normalization |
+| 0.2.23 | Pure-Rust PDF export via `pdfrs` (`pdf-native` feature): `export_to_pdf` / `export_to_pdf_bytes`, `PdfExportOptions`; code-style refactor | **PDF milestone** — PDF generation with no LibreOffice dependency |
+| 0.2.22 | `API_GUIDE.md` expansion, CLI commands enhancements, examples refactor, mermaid stub removal | **Docs/API milestone** — comprehensive API reference and example modernization |
+| 0.2.21 | Lean audit: dead code removal, `escape_xml` hot-path, `XmlWriter` cleanup, `pptcli validate` structured + `--json`, warnings cleared | **Quality milestone** — leaner codebase and structured validation CLI |
+| 0.2.20 | rmcp upgrade, core validation integrated into CLI, `PresentationEditor` (duplicate/reorder/insert slides), embedded fonts + ink annotations wiring, `AGENTS.md` | **Editor milestone** — programmatic slide editing and agent development loop |
+| 0.2.19 | PowerPoint zero-repair compat gate: `core::package_validation` API, multiple slide layouts, template-based generation, chart Excel workbook embedding, handout master packaging, slide master completeness, rel ordering | **Compatibility milestone** — structured package validation + template/layouts so decks open in PowerPoint without repair |
+| 0.2.16 | Advanced theme customization: `PresentationTheme`, custom colors/fonts embedded in `theme1.xml` | **Theme milestone** — branded PPTX output with ECMA-376 color schemes and typefaces |
+| 0.2.14 | Enhanced HTML/Markdown: real images, task lists, strikethrough, extended CSS, interactive HTML export | **Content enhancement milestone** — real-world content support with images and advanced styling |
+| 0.2.13 | MCP server (8 tools), codebase cleanup, documentation refresh | **MCP integration milestone** — AI assistant integration via Model Context Protocol |
+| 0.2.12 | Markdown export, image export (PNG/JPEG), PPTX compression | **Export & optimization milestone** — full round-trip capabilities |
+| 0.2.11 | Color aliases (40+), table helpers, extension methods, API guide | **API simplification milestone** — introduced helper pattern for 60% less boilerplate |
+| 0.2.10 | Image effects system (8 effects), ImageBuilder chainable API, JPEG fix |
+| 0.2.9 | Compatibility test sorting fix |
+| 0.2.8 | Compatibility testing infrastructure (PptxValidator, CompatibilityTestSuite) |
+| 0.2.7 | Streaming ZIP and lazy loading |
+| 0.2.6 | Error handling refactoring, From<ZipError> |
+| 0.2.5 | Codebase cleanup, merged table modules |
+| 0.2.4 | Dimension API (EMU, inches, cm, pt, ratio), trait refactoring |
+| 0.2.3 | Transitions, connectors, gradients, cell merging, charts |
+| 0.2.1 | Bullet styles, text enhancements, image from URL/base64 |
+| 0.2.0 | Templates, prelude, themes, layout helpers |
+| 0.1.8 | Prelude, gradients, transparency, connectors |
+| 0.1.7 | 12 Mermaid diagram types |
+| 0.1.6 | Syntax highlighting |
+| 0.1.5 | Enhanced markdown parsing |
+| 0.1.4 | Table text rendering fix |
+| 0.1.3 | Modular table module |
+| 0.1.2 | Animations, transitions, SmartArt |
+| 0.1.1 | Extended parts support |
+| 0.1.0 | Initial release |
+

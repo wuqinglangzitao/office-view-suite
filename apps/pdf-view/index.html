@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>pdf-view · pdfium-render(Rust→WASM)</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #525659; color: #1f2328; font: 14px/1.6 -apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif; }
+      .hidden { display: none !important; }
+      .topbar { position: sticky; top: 0; z-index: 10; display: flex; align-items: center; gap: 12px; padding: 10px 20px;
+        background: rgba(40,42,45,.95); color: #e6edf3; border-bottom: 1px solid #212427; }
+      .brand { font-weight: 700; }
+      .brand .sub { font-weight: 400; color: #9aa4b2; font-size: 12px; margin-left: 8px; }
+      #meta { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+      .chip { background: #2d3033; border: 1px solid #3d4145; color: #c9d1d9; border-radius: 999px; padding: 2px 10px; font-size: 12px; }
+      main { max-width: 960px; margin: 0 auto; padding: 24px 16px; }
+      .drop { background: #fff; border: 2px dashed #c6cdd4; border-radius: 14px; padding: 40px 20px; text-align: center; cursor: pointer; transition: .15s; }
+      .drop:hover, .drop.drag { border-color: #58a6ff; background: #f3f8ff; }
+      .drop-title { font-size: 16px; font-weight: 600; margin-top: 6px; }
+      .samples { margin: 14px 0; text-align: center; }
+      .sample-btn { border: 1px solid #c6cdd4; background: #fff; border-radius: 999px; padding: 4px 14px; margin: 3px 4px; font-size: 13px; cursor: pointer; }
+      .sample-btn:hover { border-color: #58a6ff; color: #58a6ff; }
+      #status { text-align: center; color: #c9d1d9; padding: 32px 0; }
+      .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #3d4145; border-top-color: #58a6ff; border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 10px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      #error { background: #fff5f5; border: 1px solid #ffcecb; border-radius: 10px; padding: 16px 20px; color: #cf222e; }
+      #pages { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+      .page { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); border-radius: 2px; max-width: 100%; }
+      footer { text-align: center; color: #9aa4b2; font-size: 12px; padding: 24px 0 40px; }
+    </style>
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">pdf-view<span class="sub">pdfium-render(Rust API→WASM)· PDFium/Chromium 引擎 · BSD-3 · Worker + 懒渲染</span></div>
+      <div id="meta" class="hidden"></div>
+    </header>
+    <main>
+      <section id="intake">
+        <div id="drop" class="drop">
+          <div style="font-size:32px">📄</div>
+          <div class="drop-title">拖入 PDF 文件,或点击选择</div>
+        </div>
+        <input id="file" type="file" hidden accept=".pdf" />
+      </section>
+      <section class="samples"><span style="color:#9aa4b2;font-size:12px">或试用样例:</span><span id="samples-bar"></span></section>
+      <section id="status" class="hidden"><div class="spinner"></div><div id="status-text"></div></section>
+      <section id="error" class="hidden"><div id="error-text"></div></section>
+      <section id="viewer"><div id="pages"></div></section>
+    </main>
+    <footer>解析/渲染:pdfium-render 0.9 + PDFium(BSD-3,Chromium 同款)· 二进制 vendor 于 public/pdfium · 文件不出浏览器</footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

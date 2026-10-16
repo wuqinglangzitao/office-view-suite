@@ -1,0 +1,19 @@
+[package]
+name = "excel-view-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# vendor 份:修复 UnderlineValues 默认值 Single→None 的 bug(上游 PR 级修复)
+umya-spreadsheet = { path = "vendor/umya-spreadsheet" }
+getrandom = { version = "0.4", features = ["wasm_js"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

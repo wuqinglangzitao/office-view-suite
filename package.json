@@ -1,0 +1,27 @@
+{
+  "name": "office-view-suite",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "pnpm@7.33.7",
+  "scripts": {
+    "dev:ppt": "pnpm --filter ppt-view dev",
+    "dev:word": "pnpm --filter word-view dev",
+    "dev:excel": "pnpm --filter excel-view dev",
+    "dev:pdf": "pnpm --filter pdf-view dev",
+    "build": "pnpm --workspace-concurrency=1 --recursive run build",
+    "build:ppt": "pnpm --filter ppt-view build",
+    "build:word": "pnpm --filter word-view build",
+    "build:excel": "pnpm --filter excel-view build",
+    "build:pdf": "pnpm --filter pdf-view build",
+    "typecheck": "pnpm --workspace-concurrency=1 --recursive run typecheck",
+    "typecheck:ppt": "pnpm --filter ppt-view typecheck",
+    "typecheck:word": "pnpm --filter word-view typecheck",
+    "typecheck:excel": "pnpm --filter excel-view typecheck",
+    "typecheck:pdf": "pnpm --filter pdf-view typecheck",
+    "wasm": "pnpm --workspace-concurrency=1 --recursive run wasm",
+    "wasm:ppt": "pnpm --filter ppt-view wasm",
+    "wasm:word": "pnpm --filter word-view wasm",
+    "wasm:excel": "pnpm --filter excel-view wasm",
+    "wasm:pdf": "pnpm --filter pdf-view wasm"
+  }
+}

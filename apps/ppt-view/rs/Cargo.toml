@@ -1,0 +1,19 @@
+[package]
+name = "ppt-view-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# vendor 份:ppt-rs 0.2.36 + wasm 兼容补丁(zip 去默认特性、pdf-native 门控)
+ppt-rs = { path = "vendor/ppt-rs", default-features = false }
+zip = { version = "2", default-features = false, features = ["deflate"] }
+serde = { version = "1", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+wasm-bindgen = "0.2"
+uuid = { version = "1", features = ["js"] }
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false
