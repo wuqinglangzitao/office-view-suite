@@ -1,0 +1,516 @@
+{
+  "schemaVersion": 1,
+  "reviewedAt": "2026-10-19",
+  "artifact": {
+    "repository": "https://github.com/paulocoutinhox/pdfium-lib",
+    "release": "8046d",
+    "releaseUrl": "https://github.com/paulocoutinhox/pdfium-lib/releases/tag/8046d",
+    "publishedAt": "2026-09-10T03:57:26Z",
+    "archive": {
+      "url": "https://github.com/paulocoutinhox/pdfium-lib/releases/download/8046d/wasm.zip",
+      "sha256": "062d10055de90a01120acf307ce16e0022021a32203f4aeae4877750f9a08427",
+      "size": 13414692,
+      "assetId": 554203100,
+      "digestSource": "https://api.github.com/repos/paulocoutinhox/pdfium-lib/releases/tags/8046d"
+    },
+    "files": [
+      {
+        "path": "pdfium.std.js",
+        "archivePath": "release/node/pdfium.std.js",
+        "sha256": "30d0b02a8d828627838a0d6b62a2ae960dc1d6fc24081ca426afaaae0f37c8c9"
+      },
+      {
+        "path": "pdfium.std.wasm",
+        "archivePath": "release/node/pdfium.std.wasm",
+        "sha256": "223e608c0980885d8fb31638f1533b6c62dba1803b9595ba9fd34879064ceee0"
+      }
+    ],
+    "builderCommit": "f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871",
+    "pdfium": {
+      "ref": "chromium/8046",
+      "commit": "f91ca5a72358bb0b00b4da9481b21fe668157614"
+    },
+    "emscripten": {
+      "version": "6.0.0",
+      "commit": "afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3"
+    },
+    "workflow": "https://github.com/paulocoutinhox/pdfium-lib/actions/runs/34435296619"
+  },
+  "configuration": {
+    "source": "https://github.com/paulocoutinhox/pdfium-lib/blob/f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871/modules/common.py",
+    "linkSource": "https://github.com/paulocoutinhox/pdfium-lib/blob/f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871/modules/wasm.py",
+    "gnArguments": [
+      "is_debug=false",
+      "pdf_use_partition_alloc=false",
+      "target_cpu=\"wasm\"",
+      "target_os=\"emscripten\"",
+      "pdf_enable_v8=false",
+      "pdf_enable_xfa=false",
+      "treat_warnings_as_errors=false",
+      "is_component_build=false",
+      "symbol_level=0",
+      "pdf_is_complete_lib=true",
+      "is_clang=false",
+      "use_custom_libcxx=false"
+    ],
+    "linkFlags": [
+      "-O2",
+      "-s USE_ZLIB=1",
+      "-s USE_LIBJPEG=1",
+      "-s FORCE_FILESYSTEM=1",
+      "-s ASSERTIONS=1",
+      "-s ALLOW_MEMORY_GROWTH=1",
+      "-s STANDALONE_WASM=1",
+      "-s WASM_ASYNC_COMPILATION=0",
+      "--no-entry"
+    ],
+    "compiledThirdPartyDirectories": [
+      "abseil-cpp",
+      "agg23",
+      "freetype",
+      "harfbuzz",
+      "icu",
+      "lcms",
+      "libjpeg_turbo",
+      "libopenjpeg",
+      "zlib"
+    ],
+    "headerDependencies": [
+      "dragonbox",
+      "fast_float"
+    ],
+    "excludedByConfiguration": [
+      "V8",
+      "Skia",
+      "PartitionAlloc",
+      "Brotli",
+      "BigInt",
+      "libtiff",
+      "libpng",
+      "Fontations",
+      "Rust decoders"
+    ]
+  },
+  "ports": [
+    {
+      "name": "zlib",
+      "version": "1.3.2",
+      "archive": "https://github.com/madler/zlib/archive/refs/tags/v1.3.2.tar.gz",
+      "sha512": "16fea4df307a68cf0035858abe2fd550250618a97590e202037acd18a666f57afc10f8836cbbd472d54a0e76539d0e558cb26f059d53de52ff90634bbf4f47d4",
+      "recipe": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/tools/ports/zlib.py"
+    },
+    {
+      "name": "libjpeg",
+      "version": "9f",
+      "archive": "https://storage.googleapis.com/webassembly/emscripten-ports/jpegsrc.v9f.tar.gz",
+      "sha512": "7f733d79cf176c690dcf127352f9aa7ec48000455944f286faae606cdeada6f6865b4a3f9f01bda8947b5b1089bb3e52d2b56879b6e871279ec5cbd1829304dc",
+      "recipe": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/tools/ports/libjpeg.py"
+    }
+  ],
+  "components": [
+    {
+      "name": "PDFium (including Foxit built-in fonts)",
+      "version": "chromium/8046 @ f91ca5a72358bb0b00b4da9481b21fe668157614",
+      "source": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/",
+      "license": "BSD-3-Clause (root LICENSE also carries Apache-2.0 text for portions of the source tree)",
+      "notes": "Preserve the complete original LICENSE. This does not mean all PDFium code is alternatively licensed under Apache.",
+      "licenseFiles": [
+        "licenses/pdfium-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "Abseil",
+      "version": "435e7d977fb36fb47854a4c552c0706dad0bd7cf (DEPS pin)",
+      "source": "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp/+/435e7d977fb36fb47854a4c552c0706dad0bd7cf/",
+      "license": "Apache-2.0",
+      "licenseFiles": [
+        "licenses/abseil-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Anti-Grain Geometry",
+      "version": "2.3 (PDFium vendored copy)",
+      "source": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/agg23/",
+      "license": "MIT-style permissive license (preserve copying verbatim)",
+      "licenseFiles": [
+        "licenses/agg23-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Dragonbox",
+      "version": "beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44 (DEPS pin; PDFium README labels 1.1.3)",
+      "source": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox/+/beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44/",
+      "license": "Apache-2.0 WITH LLVM-exception OR BSL-1.0",
+      "licenseFiles": [
+        "licenses/dragonbox-LICENSE-Boost.txt",
+        "licenses/dragonbox-LICENSE-Apache2-LLVM.txt"
+      ]
+    },
+    {
+      "name": "fast_float",
+      "version": "34164f547b7df3f5d794ff67e9f885c36819ebfc (DEPS pin; PDFium README labels 7.0.0)",
+      "source": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float/+/34164f547b7df3f5d794ff67e9f885c36819ebfc/",
+      "license": "MIT option",
+      "licenseFiles": [
+        "licenses/fast-float-LICENSE-MIT.txt"
+      ]
+    },
+    {
+      "name": "FreeType",
+      "version": "4800589f76dc62fbe523a74a59e0d4850a5dd7df (PDFium README labels VER-2-14-3-85)",
+      "source": "https://chromium.googlesource.com/chromium/src/third_party/freetype2/+/4800589f76dc62fbe523a74a59e0d4850a5dd7df/",
+      "license": "FTL option; hash helpers also MIT",
+      "notes": "Use FTL option for this notice set, not GPL. Include explicit documentation credit to FreeType. fthash.c MIT is in supplemental-source-notices.",
+      "licenseFiles": [
+        "licenses/freetype-FTL.txt",
+        "licenses/freetype-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "HarfBuzz",
+      "version": "886fc1e645388080b72f6d9b06347533a0018045 (DEPS pin; PDFium README labels 14.2.0-11)",
+      "source": "https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz/+/886fc1e645388080b72f6d9b06347533a0018045/",
+      "license": "MIT-Modern-Variant (Old MIT), plus source-specific MIT/ISC notices",
+      "notes": "Additional hb-algs.hh fasthash MIT and hb-ucd.cc ISC are preserved in supplemental source notices. Unicode data terms are retained in the full ICU/Unicode license bundle.",
+      "licenseFiles": [
+        "licenses/harfbuzz-COPYING.txt",
+        "licenses/harfbuzz-ms-use-COPYING.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "FontTools (HarfBuzz instancer-derived code)",
+      "version": "f73220816264fc383b8a75f2146e8d69e455d398 (commit linked by hb-subset-instancer-solver.cc)",
+      "source": "https://github.com/fonttools/fonttools/tree/f73220816264fc383b8a75f2146e8d69e455d398",
+      "license": "MIT",
+      "notes": "Conservative notice for explicitly ported source; HarfBuzz's own file headers still apply. The IUP port links an unpinned main source, so no exact IUP code-version claim.",
+      "licenseFiles": [
+        "licenses/fonttools-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "ICU",
+      "version": "8cc91d9b6ab9991802fd208ee03a69714fd0251c (DEPS pin)",
+      "source": "https://chromium.googlesource.com/chromium/deps/icu/+/8cc91d9b6ab9991802fd208ee03a69714fd0251c/",
+      "license": "Unicode-3.0 plus the third-party notices in LICENSE",
+      "licenseFiles": [
+        "licenses/icu-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Little CMS",
+      "version": "2.19 (PDFium vendored copy; README revision b76633e60c8387a77268fb3359277ca25b5fd75c)",
+      "source": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/lcms/",
+      "license": "MIT",
+      "notes": "Supplemental source notices also preserve source copyright (c) 1998-2026 Marti Maria Saguer.",
+      "licenseFiles": [
+        "licenses/lcms-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "libjpeg-turbo (Chromium fork)",
+      "version": "3.1.0 @ 640f254ad0fa03f6b1f29f89b7dd9366f2f6e533",
+      "source": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo/+/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533/",
+      "license": "IJG AND BSD-3-Clause (per README.chromium)",
+      "notes": "Product documentation must include: This software is based in part on the work of the Independent JPEG Group.",
+      "licenseFiles": [
+        "licenses/libjpeg-turbo-LICENSE.md",
+        "licenses/libjpeg-turbo-README.ijg"
+      ]
+    },
+    {
+      "name": "OpenJPEG",
+      "version": "2.5.4 (PDFium vendored copy; README revision 6c4a29b00211eb0430fa0e5e890f1ce5c80f409f)",
+      "source": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/libopenjpeg/",
+      "license": "BSD-2-Clause",
+      "notes": "Supplemental notices preserve separate source author blocks, including HTJ2K Aous Naman, Kakadu Software, UNSW.",
+      "licenseFiles": [
+        "licenses/openjpeg-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "zlib (Chromium fork)",
+      "version": "1.3.2 @ 285e94b8fa95ad3b7d16b80798ec8dce6febb8c8",
+      "source": "https://chromium.googlesource.com/chromium/src/third_party/zlib/+/285e94b8fa95ad3b7d16b80798ec8dce6febb8c8/",
+      "license": "Zlib; Chromium CPU detection source also BSD-3-Clause",
+      "licenseFiles": [
+        "licenses/zlib-chromium-LICENSE.txt",
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md",
+        "licenses/chromium-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Chromium source modifications",
+      "version": "Chromium branch 8046 license text; b30807b95072698b8bf3d3fd0729386f815adb25",
+      "source": "https://chromium.googlesource.com/chromium/src/+/b30807b95072698b8bf3d3fd0729386f815adb25/",
+      "license": "BSD-3-Clause",
+      "licenseFiles": [
+        "licenses/chromium-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Additional source notices",
+      "version": "Fixed source commits mapped in document",
+      "source": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/",
+      "license": "Source-specific BSD, MIT, ISC and retained font copyright",
+      "licenseFiles": [
+        "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md"
+      ]
+    },
+    {
+      "name": "pdfium-lib WASM helper",
+      "version": "8046d @ f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871",
+      "source": "https://github.com/paulocoutinhox/pdfium-lib/tree/f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871",
+      "license": "MIT",
+      "licenseFiles": [
+        "licenses/pdfium-lib-LICENSE.txt",
+        "licenses/pdfium-LICENSE.txt"
+      ],
+      "notes": "extras/wasm/utils/custom.cpp is compiled into the WASM; it references PDFium's sample initialization code."
+    },
+    {
+      "name": "Emscripten JavaScript and system runtime",
+      "version": "6.0.0 @ afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3",
+      "source": "https://github.com/emscripten-core/emscripten/tree/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3",
+      "license": "MIT option (upstream root also offers NCSA; Node.js-derived portions MIT)",
+      "licenseFiles": [
+        "licenses/Emscripten-LICENSE.txt",
+        "licenses/Emscripten-AUTHORS.txt",
+        "licenses/Emscripten-SOURCE-NOTICES.md"
+      ]
+    },
+    {
+      "name": "musl libc",
+      "version": "1.2.6-derived, with Emscripten 6.0.0 modifications",
+      "source": "https://github.com/emscripten-core/emscripten/tree/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/libc/musl",
+      "license": "MIT and embedded source-specific permissive notices",
+      "licenseFiles": [
+        "licenses/musl-COPYRIGHT.txt",
+        "licenses/Emscripten-SOURCE-NOTICES.md"
+      ],
+      "notes": "Generic musl source copyright/license comments are retained conservatively, including Sun, BSD, ISC and Arm notices; not every source function necessarily survives linking."
+    },
+    {
+      "name": "LLVM C/C++ runtimes",
+      "version": "Sources bundled with Emscripten 6.0.0",
+      "source": "https://github.com/emscripten-core/emscripten/tree/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib",
+      "license": "Apache-2.0 WITH LLVM-exception; legacy MIT/NCSA and Ryu BSL-1.0 notices retained",
+      "licenseFiles": [
+        "licenses/compiler-rt-LICENSE.txt",
+        "licenses/libcxx-LICENSE.txt",
+        "licenses/libcxxabi-LICENSE.txt",
+        "licenses/libunwind-LICENSE.txt",
+        "licenses/llvm-libc-LICENSE.txt",
+        "licenses/Emscripten-SOURCE-NOTICES.md"
+      ],
+      "notes": "Conservative toolchain runtime license set. The build uses Emscripten's C++ runtime (use_custom_libcxx=false); inclusion is not a claim that all runtime libraries or Ryu functions survive linking."
+    },
+    {
+      "name": "dlmalloc",
+      "version": "2.8.6, Emscripten 6.0.0 copy",
+      "source": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/dlmalloc.c",
+      "license": "Public-domain declaration (upstream references CC0-1.0)",
+      "licenseFiles": [
+        "licenses/Emscripten-SOURCE-NOTICES.md"
+      ],
+      "notes": "Upstream public-domain notice preserved as an excerpt; Emscripten modifications are covered by its license."
+    },
+    {
+      "name": "zlib (Emscripten port)",
+      "version": "1.3.2",
+      "source": "https://github.com/madler/zlib/tree/v1.3.2",
+      "license": "Zlib",
+      "licenseFiles": [
+        "licenses/zlib-emscripten-LICENSE.txt"
+      ],
+      "notes": "Archive SHA-512 verified against the fixed Emscripten 6.0.0 tools/ports/zlib.py recipe. This is separate from PDFium's Chromium zlib input."
+    },
+    {
+      "name": "IJG libjpeg (Emscripten port)",
+      "version": "9f",
+      "source": "https://storage.googleapis.com/webassembly/emscripten-ports/jpegsrc.v9f.tar.gz",
+      "license": "IJG",
+      "licenseFiles": [
+        "licenses/IJG-9f-README.txt"
+      ],
+      "notes": "Archive SHA-512 verified against the fixed Emscripten 6.0.0 tools/ports/libjpeg.py recipe; build log confirms this port was fetched."
+    }
+  ],
+  "licenseFiles": [
+    {
+      "path": "licenses/pdfium-LICENSE.txt",
+      "sourceUrl": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/LICENSE",
+      "sha256": "1fe9dea718fbd75cf149adaf4d8a22a4335604d964ddb76d1b45383dec8668c9"
+    },
+    {
+      "path": "licenses/abseil-LICENSE.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src/third_party/abseil-cpp/+/435e7d977fb36fb47854a4c552c0706dad0bd7cf/LICENSE",
+      "sha256": "aac73b3148f6d1d7111dbca32099f68d26c644c6813ae1e4f05f6579aa2663fe"
+    },
+    {
+      "path": "licenses/agg23-LICENSE.txt",
+      "sourceUrl": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/agg23/copying",
+      "sha256": "0e16f9c2285583269242e94c6f502de0c9910dfcbbc7b386e236cdf29ecd4333"
+    },
+    {
+      "path": "licenses/dragonbox-LICENSE-Boost.txt",
+      "sourceUrl": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox/+/beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44/LICENSE-Boost",
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    },
+    {
+      "path": "licenses/dragonbox-LICENSE-Apache2-LLVM.txt",
+      "sourceUrl": "https://chromium.googlesource.com/external/github.com/jk-jeon/dragonbox/+/beeeef91cf6fef89a4d4ba5e95d47ca64ccb3a44/LICENSE-Apache2-LLVM",
+      "sha256": "9e45e856bedccee9f67254082ca11851d954de2fed7448c4bed19ad9aab99a91"
+    },
+    {
+      "path": "licenses/fast-float-LICENSE-MIT.txt",
+      "sourceUrl": "https://chromium.googlesource.com/external/github.com/fastfloat/fast_float/+/34164f547b7df3f5d794ff67e9f885c36819ebfc/LICENSE-MIT",
+      "sha256": "e562f3f974ced7e69dd1db77b820b36bcf8f30377f1aa105723fba449c53c4e6"
+    },
+    {
+      "path": "licenses/freetype-FTL.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src/third_party/freetype2/+/4800589f76dc62fbe523a74a59e0d4850a5dd7df/docs/FTL.TXT",
+      "notes": "UTF-8 source, avoids Latin1 PDFium sibling copy.",
+      "sha256": "5a5ee54c5001bbad1cdc1a57cc3dd4c42199b2da09d39c7ee41fab002d02967f"
+    },
+    {
+      "path": "licenses/freetype-LICENSE.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src/third_party/freetype2/+/4800589f76dc62fbe523a74a59e0d4850a5dd7df/LICENSE.TXT",
+      "sha256": "bd36c8b474855fa294c2ec5c184544478ef3720aad37d65a6296a4f264fd2d3b"
+    },
+    {
+      "path": "licenses/harfbuzz-COPYING.txt",
+      "sourceUrl": "https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz/+/886fc1e645388080b72f6d9b06347533a0018045/COPYING",
+      "sha256": "ba8f810f2455c2f08e2d56bb49b72f37fcf68f1f4fade38977cfd7372050ad64"
+    },
+    {
+      "path": "licenses/harfbuzz-ms-use-COPYING.txt",
+      "sourceUrl": "https://chromium.googlesource.com/external/github.com/harfbuzz/harfbuzz/+/886fc1e645388080b72f6d9b06347533a0018045/src/ms-use/COPYING",
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "path": "licenses/fonttools-LICENSE.txt",
+      "sourceUrl": "https://raw.githubusercontent.com/fonttools/fonttools/f73220816264fc383b8a75f2146e8d69e455d398/LICENSE",
+      "sha256": "6787208f83f659ccbc2223b2fde952ffa6f7e8aca62f1a8a2bf5bc51bb1b2383"
+    },
+    {
+      "path": "licenses/icu-LICENSE.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/deps/icu/+/8cc91d9b6ab9991802fd208ee03a69714fd0251c/LICENSE",
+      "notes": "Full 27KB upstream aggregate, not only the first Unicode license.",
+      "sha256": "e55522d81edc687a341a4411e0776e54ca654e90147f354a90458aaced4116af"
+    },
+    {
+      "path": "licenses/lcms-LICENSE.txt",
+      "sourceUrl": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/lcms/LICENSE",
+      "sha256": "6dbd60437f8ef91d8de1f08ad75882547fd4931bfcc3566a0735f28db1484d31"
+    },
+    {
+      "path": "licenses/libjpeg-turbo-LICENSE.md",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo/+/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533/LICENSE.md.chromium",
+      "notes": "Chromium aggregate combines LICENSE.md and licensing sections of README.ijg.",
+      "sha256": "152a0f78d9c3a3afc09470cba1e66eabb915515cb121252d6c85c4ed6352a073"
+    },
+    {
+      "path": "licenses/libjpeg-turbo-README.ijg",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/deps/libjpeg_turbo/+/640f254ad0fa03f6b1f29f89b7dd9366f2f6e533/README.ijg",
+      "sha256": "75815e3bf6484201a3c3d17a1bbf10f2e8e3237f84df10a2357ea896db2a81d6"
+    },
+    {
+      "path": "licenses/openjpeg-LICENSE.txt",
+      "sourceUrl": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/third_party/libopenjpeg/LICENSE",
+      "sha256": "a6af136f3e15038a666b61f376612a07d9a4e48cb7c01adbf3e33b3f14ab49b6"
+    },
+    {
+      "path": "licenses/zlib-chromium-LICENSE.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src/third_party/zlib/+/285e94b8fa95ad3b7d16b80798ec8dce6febb8c8/LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    },
+    {
+      "path": "licenses/chromium-LICENSE.txt",
+      "sourceUrl": "https://chromium.googlesource.com/chromium/src/+/b30807b95072698b8bf3d3fd0729386f815adb25/LICENSE",
+      "notes": "This is the BSD text referenced by Chromium-origin source files, not a claim that an entire Chromium browser was shipped.",
+      "sha256": "368cca1106be99d39ecd32a38d8305585d802a475effb66380b91ffc9bcf709b"
+    },
+    {
+      "path": "licenses/SUPPLEMENTAL_SOURCE_NOTICES.md",
+      "sourceUrl": "https://pdfium.googlesource.com/pdfium/+/f91ca5a72358bb0b00b4da9481b21fe668157614/",
+      "notes": "Extracted verbatim copyright/license comment blocks. Sources and fixed commits are mapped inside the document; includes conservative OpenJPEG header coverage.",
+      "sha256": "fff7351dca7012a565b23df106914751b0a9cf9babc6d2895cac29ac19e6885f"
+    },
+    {
+      "path": "licenses/Emscripten-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/LICENSE",
+      "sha256": "51aea7641f81d560eb039bc97ce35e2517e2656fe8731eb49ce6a18498eb22fe"
+    },
+    {
+      "path": "licenses/Emscripten-AUTHORS.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/AUTHORS",
+      "sha256": "9d24c3cb52c1f712fbc6660337074f76eb2a12a0dde1dd0076c4310807c4e83c"
+    },
+    {
+      "path": "licenses/musl-COPYRIGHT.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/libc/musl/COPYRIGHT",
+      "sha256": "b870108ec5e7790e9f9919064f1b9421d62d5f9b0e6c230c6adf7ea2da62e97b"
+    },
+    {
+      "path": "licenses/compiler-rt-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/compiler-rt/LICENSE.TXT",
+      "sha256": "1a8f1058753f1ba890de984e48f0242a3a5c29a6a8f2ed9fd813f36985387e8d"
+    },
+    {
+      "path": "licenses/libcxx-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/libcxx/LICENSE.TXT",
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b"
+    },
+    {
+      "path": "licenses/libcxxabi-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/libcxxabi/LICENSE.TXT",
+      "sha256": "e2b35be49f7284a45b7baca8fc7b3ab7440e7902392b2528a457816b5bb2a15c"
+    },
+    {
+      "path": "licenses/libunwind-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d"
+    },
+    {
+      "path": "licenses/llvm-libc-LICENSE.txt",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/blob/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/system/lib/llvm-libc/LICENSE.TXT",
+      "sha256": "ebcd9bbf783a73d05c53ba4d586b8d5813dcdf3bbec50265860ccc885e606f47"
+    },
+    {
+      "path": "licenses/IJG-9f-README.txt",
+      "sourceUrl": "https://storage.googleapis.com/webassembly/emscripten-ports/jpegsrc.v9f.tar.gz#jpeg-9f/README",
+      "sha256": "7c25493a9f64fed34d01445467341bda77bc1cdbeccbe33558659ef173fb9ff2"
+    },
+    {
+      "path": "licenses/Emscripten-SOURCE-NOTICES.md",
+      "sourceUrl": "https://github.com/emscripten-core/emscripten/tree/afa15e0c56d1292e073c2c91bafc1d5e0cdf0dd3/",
+      "notes": "Verbatim source comment excerpts; conservative toolchain source notice superset, see per-excerpt fixed-commit URLs.",
+      "sha256": "770e0af26d35c597fc9ba1428a981d2a8bc09b775a6f59f913c6fce28a96abc1"
+    },
+    {
+      "path": "licenses/zlib-emscripten-LICENSE.txt",
+      "sourceUrl": "https://github.com/madler/zlib/archive/refs/tags/v1.3.2.tar.gz#zlib-1.3.2/LICENSE",
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    },
+    {
+      "path": "licenses/pdfium-lib-LICENSE.txt",
+      "sourceUrl": "https://github.com/paulocoutinhox/pdfium-lib/blob/f2bed3c8bd49569a6b5c2a0df3a1ae0def3d8871/LICENSE.md",
+      "sha256": "f76cf515028a29998219ef69368c12c29ac0507df55475408e590e32f7627a5d"
+    }
+  ],
+  "scopeNotes": [
+    "NotoSans and test_fonts are test resources and absent from the production compilation inputs.",
+    "All 16 Foxit* font source files compile into the archive. Their headers use the PDFium BSD-style license with Foxit copyright. FoxitSansMM/FoxitSerifMM byte arrays additionally retain Adobe 1990-1994 copyright notices.",
+    "Ninja compilation proves archive inputs; conservative supplementary texts do not claim all object code survives the final WASM link.",
+    "No ready-made license bundle was found in the upstream wasm.zip. PDFium checkout has no tools/licenses.py; the bblanchon generator is a different builder and not a license bundle for this artifact.",
+    "Emscripten system runtime notices are a conservative source set; they are not a symbol-level linker map.",
+    "Source license copies preserve legal text; line endings and trailing blank lines are normalized. Source-comment compilations are explicitly labeled excerpts.",
+    "The offline verifier proves consistency with this recorded notice set, not the legal sufficiency of future builds or unrelated assets."
+  ]
+}

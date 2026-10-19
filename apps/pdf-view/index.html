@@ -25,8 +25,6 @@
       .spinner { display: inline-block; width: 22px; height: 22px; border: 3px solid #3d4145; border-top-color: #58a6ff; border-radius: 50%; animation: spin .8s linear infinite; margin-bottom: 10px; }
       @keyframes spin { to { transform: rotate(360deg); } }
       #error { background: #fff5f5; border: 1px solid #ffcecb; border-radius: 10px; padding: 16px 20px; color: #cf222e; }
-      #pages { display: flex; flex-direction: column; align-items: center; gap: 16px; }
-      .page { background: #fff; box-shadow: 0 2px 8px rgba(0,0,0,.35); border-radius: 2px; max-width: 100%; }
       footer { text-align: center; color: #9aa4b2; font-size: 12px; padding: 24px 0 40px; }
     </style>
   </head>
@@ -46,7 +44,7 @@
       <section class="samples"><span style="color:#9aa4b2;font-size:12px">或试用样例:</span><span id="samples-bar"></span></section>
       <section id="status" class="hidden"><div class="spinner"></div><div id="status-text"></div></section>
       <section id="error" class="hidden"><div id="error-text"></div></section>
-      <section id="viewer"><div id="pages"></div></section>
+      <section id="viewer"></section>
     </main>
     <footer>解析/渲染:pdfium-render 0.9 + PDFium(BSD-3,Chromium 同款)· 二进制 vendor 于 public/pdfium · 文件不出浏览器</footer>
     <script type="module" src="/src/main.ts"></script>

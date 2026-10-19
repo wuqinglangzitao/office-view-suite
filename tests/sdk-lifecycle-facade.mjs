@@ -1,0 +1,252 @@
+import assert from 'node:assert/strict';
+import { registerHooks } from 'node:module';
+import test from 'node:test';
+
+const turn = () => new Promise(resolve => setImmediate(resolve));
+const rejectedWith = code => error => error.code === code;
+const input = format => ({ format, bytes: new Uint8Array([1, 2, 3]) });
+let releaseExcelImport;
+globalThis.__sdkMockImports = { excel: new Promise(resolve => { releaseExcelImport = resolve; }) };
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    const kind = /^@office-view-suite\/viewer-(word|excel|ppt|pdf)$/.exec(specifier)?.[1];
+    if (!kind) return nextResolve(specifier, context);
+    const name = kind[0].toUpperCase() + kind.slice(1);
+    const code = `await globalThis.__sdkMockImports?.[${JSON.stringify(kind)}]; export function create${name}Adapter(options) { return globalThis.__sdkAdapterFactory(${JSON.stringify(kind)}, options); }`;
+    return { url: `data:text/javascript,${encodeURIComponent(code)}`, shortCircuit: true };
+  },
+});
+const { createOfficeViewer } = await import('../packages/viewer/dist/index.js');
+
+class Element {
+  children = [];
+  style = {};
+  width = 640;
+  ownerDocument = { createElement: () => new Element() };
+  appendChild(child) { this.children.push(child); child.parent = this; return child; }
+  attachShadow() { this.shadowRoot = { children: [], replaceChildren(...children) { this.children = children; } }; return this.shadowRoot; }
+  getBoundingClientRect() { return { width: this.width }; }
+  remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
+}
+
+const observers = [];
+globalThis.ResizeObserver = class {
+  constructor(callback) { this.callback = callback; observers.push(this); }
+  observe(target) { this.target = target; }
+  disconnect() { this.disconnected = true; }
+  notify(width, height = 300) { this.callback([{ target: this.target, contentRect: { width, height } }]); }
+};
+const frames = new Map();
+let nextFrame = 0;
+globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callback); return nextFrame; };
+globalThis.cancelAnimationFrame = id => frames.delete(id);
+function flushFrames() { for (const [id, callback] of frames) { frames.delete(id); callback(); } }
+
+function runtime({ open, resize = true } = {}) {
+  const calls = { created: 0, destroyed: 0, rendered: 0, disposed: 0, resized: 0, options: [], kinds: [] };
+  globalThis.__sdkAdapterFactory = (kind, options) => {
+    calls.created++;
+    calls.kinds.push(kind);
+    calls.options.push(options);
+    return {
+      open: open ?? (async request => ({ format: request.format, document: { label: 'document' }, stats: { sheets: 2 }, durationMs: 1, warnings: [{ code: 'FONT', message: 'fallback' }] })),
+      render(host, document, onError) {
+        calls.rendered++;
+        calls.document = document;
+        calls.onError = onError;
+        host.shadowRoot.replaceChildren(document);
+        return {
+          stats: { pages: 3 },
+          dispose() { calls.disposed++; host.shadowRoot.replaceChildren(); },
+          ...(resize ? { resize() { calls.resized++; } } : {}),
+        };
+      },
+      destroy() { calls.destroyed++; },
+    };
+  };
+  return calls;
+}
+
+test('facade cancellation settles during lazy adapter loading and creates no adapter after destroy', async () => {
+  const calls = runtime();
+  const viewer = createOfficeViewer(new Element());
+  const opening = viewer.open(input('xlsx'));
+  const rejected = assert.rejects(opening, rejectedWith('DESTROYED'));
+  await turn();
+  viewer.destroy();
+  await rejected;
+  releaseExcelImport();
+  await turn();
+  assert.equal(calls.created, 0);
+  await assert.rejects(viewer.open(input('xlsx')), rejectedWith('DESTROYED'));
+});
+
+test('facade owns only its child and listener exceptions cannot break open or cleanup', async () => {
+  const calls = runtime();
+  const container = new Element();
+  const sibling = container.appendChild(new Element());
+  const originalShadow = container.attachShadow();
+  originalShadow.replaceChildren('host content');
+  container.style.color = 'red';
+  const options = { assets: { baseUrl: '/static/office/' } };
+  const viewer = createOfficeViewer(container, options);
+  const events = [];
+  viewer.on(() => { throw new Error('consumer bug'); });
+  viewer.on(event => events.push(event));
+  const result = await viewer.open(input('docx'));
+  assert.equal(calls.options[0], options);
+  assert.equal(result.pageCount, 3);
+  assert.equal(result.itemCount, 2);
+  assert.deepEqual(result.warnings, [{ code: 'FONT', message: 'fallback' }]);
+  assert.ok(events.some(event => event.type === 'warning' && event.code === 'FONT'));
+  assert.equal(container.children.length, 2);
+  assert.deepEqual(originalShadow.children, ['host content']);
+  viewer.clear();
+  assert.equal(calls.disposed, 1);
+  viewer.destroy();
+  await turn();
+  assert.deepEqual(container.children, [sibling]);
+  assert.equal(container.style.color, 'red');
+  assert.equal(calls.destroyed, 1);
+  assert.equal(observers.at(-1).disconnected, true);
+});
+
+test('width changes coalesce resize without rerendering on height changes', async () => {
+  const calls = runtime();
+  const container = new Element();
+  const viewer = createOfficeViewer(container);
+  await viewer.open(input('docx'));
+  const observer = observers.at(-1);
+  observer.notify(640, 300);
+  observer.notify(640, 1200);
+  flushFrames();
+  assert.equal(calls.resized, 0);
+  assert.equal(calls.rendered, 1);
+  container.width = 700;
+  observer.notify(680);
+  observer.notify(700);
+  flushFrames();
+  assert.equal(calls.resized, 1);
+  assert.equal(calls.rendered, 1);
+  viewer.resize();
+  assert.equal(calls.resized, 2);
+  container.width = 800;
+  observer.notify(800);
+  viewer.destroy();
+  flushFrames();
+  assert.equal(calls.resized, 2);
+});
+
+test('fallback resize rerenders only on width change, and each instance owns its adapter', async () => {
+  const calls = runtime({ resize: false });
+  const firstContainer = new Element();
+  const first = createOfficeViewer(firstContainer);
+  const second = createOfficeViewer(new Element());
+  await Promise.all([first.open(input('docx')), second.open(input('docx'))]);
+  assert.equal(calls.created, 2);
+  const observer = observers.at(-2);
+  firstContainer.width = 720;
+  observer.notify(720);
+  flushFrames();
+  assert.equal(calls.rendered, 3);
+  assert.equal(calls.disposed, 1);
+  first.destroy();
+  await turn();
+  assert.equal(calls.destroyed, 1);
+  await second.open(input('docm'));
+  assert.equal(calls.created, 2, 'docx and docm use one Word adapter per viewer');
+  second.destroy();
+});
+
+test('pre-aborted and delayed Blob requests do not initialize adapters', async () => {
+  const calls = runtime();
+  const viewer = createOfficeViewer(new Element());
+  await assert.rejects(viewer.open({ ...input('docx'), signal: AbortSignal.abort() }), rejectedWith('ABORTED'));
+  let finishRead;
+  class SlowBlob extends Blob { arrayBuffer() { return new Promise(resolve => { finishRead = resolve; }); } }
+  const opening = viewer.open({ bytes: new SlowBlob(['file']), format: 'docx' });
+  const rejected = assert.rejects(opening, rejectedWith('ABORTED'));
+  viewer.clear();
+  await rejected;
+  finishRead(new Uint8Array([1, 2, 3]).buffer);
+  await turn();
+  assert.equal(calls.created, 0);
+  viewer.destroy();
+});
+
+test('late parsed documents cannot overwrite replacements or cleared content', async () => {
+  const pending = [];
+  const calls = runtime({ open: request => new Promise(resolve => pending.push(() => resolve({ format: request.format, document: { label: request.name }, stats: {}, warnings: [], durationMs: 1 }))) });
+  const viewer = createOfficeViewer(new Element());
+  const first = viewer.open({ ...input('docx'), name: 'old.docx' });
+  const rejected = assert.rejects(first, rejectedWith('ABORTED'));
+  await turn();
+  const second = viewer.open({ ...input('docx'), name: 'new.docx' });
+  await rejected;
+  await turn();
+  pending[1]();
+  await second;
+  pending[0]();
+  await turn();
+  assert.equal(calls.rendered, 1);
+  assert.equal(calls.document.label, 'new.docx');
+  const lateError = calls.onError;
+  const events = [];
+  viewer.on(event => events.push(event));
+  viewer.clear();
+  lateError(new Error('old image failed'));
+  assert.equal(events.filter(event => event.type === 'error').length, 0);
+  viewer.destroy();
+});
+
+test('failed adapter creation is not cached and render errors use RENDER_FAILED', async () => {
+  const calls = runtime();
+  const factory = globalThis.__sdkAdapterFactory;
+  let attempts = 0;
+  globalThis.__sdkAdapterFactory = (...args) => { if (++attempts === 1) throw new Error('asset setup'); return factory(...args); };
+  const viewer = createOfficeViewer(new Element());
+  await assert.rejects(viewer.open(input('docx')), rejectedWith('ASSET_LOAD_FAILED'));
+  await viewer.open(input('docx'));
+  assert.equal(calls.rendered, 1);
+  viewer.destroy();
+  globalThis.__sdkAdapterFactory = (...args) => ({ ...factory(...args), render() { throw new Error('layout failed'); } });
+  const broken = createOfficeViewer(new Element());
+  await assert.rejects(broken.open(input('docx')), rejectedWith('RENDER_FAILED'));
+  broken.destroy();
+});
+
+test('loading listeners can clear, destroy, or replace the request without stale work', async () => {
+  for (const action of ['clear', 'destroy', 'replace']) {
+    const calls = runtime();
+    const viewer = createOfficeViewer(new Element());
+    let replacement;
+    let acted = false;
+    viewer.on(event => {
+      if (event.type !== 'statechange' || event.state !== 'loading' || acted) return;
+      acted = true;
+      if (action === 'clear') viewer.clear();
+      if (action === 'destroy') viewer.destroy();
+      if (action === 'replace') replacement = viewer.open(input('docm'));
+    });
+    await assert.rejects(viewer.open(input('docx')), rejectedWith(action === 'destroy' ? 'DESTROYED' : 'ABORTED'));
+    if (replacement) await replacement;
+    assert.equal(calls.rendered, action === 'replace' ? 1 : 0);
+    viewer.destroy();
+  }
+});
+
+test('a host shown again at the same width resumes incremental rendering', async () => {
+  const calls = runtime();
+  const host = new Element();
+  const viewer = createOfficeViewer(host);
+  await viewer.open(input('docx'));
+  const observer = observers.at(-1);
+  host.width = 0;
+  observer.notify(0);
+  flushFrames();
+  host.width = 640;
+  observer.notify(640);
+  flushFrames();
+  assert.equal(calls.resized, 1);
+  viewer.destroy();
+});

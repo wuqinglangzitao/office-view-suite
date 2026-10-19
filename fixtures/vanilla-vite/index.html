@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Office Viewer SDK fixture</title>
+    <style>
+      body { margin: 24px; font: 14px system-ui; background: #f5f5f5; }
+      nav { display: flex; gap: 8px; margin: 16px 0; }
+      output { display: block; margin-bottom: 16px; overflow-wrap: anywhere; }
+      .viewers { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 1fr); gap: 20px; }
+      section { min-width: 0; min-height: 480px; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Office Viewer SDK</h1>
+      <input id="file" type="file" accept=".doc,.docx,.docm,.xlsx,.xlsm,.pptx,.pdf" />
+      <nav>
+        <button data-sample="word">Word 样例</button><button data-sample="excel">Excel 样例</button>
+        <button data-sample="ppt">PPT 样例</button><button data-sample="pdf">PDF 样例</button>
+        <button id="clear">清空</button>
+      </nav>
+      <output id="status" aria-live="polite">选择文件或样例</output>
+      <div class="viewers"><section id="viewer"></section><section id="second-viewer"></section></div>
+    </main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

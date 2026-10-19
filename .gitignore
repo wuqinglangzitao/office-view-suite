@@ -9,3 +9,10 @@ target/
 *.log
 .env.local
 .env.*.local
+
+# Generated SDK assets and local verification output
+packages/*/src/assets/
+packages/*/src/wasm/
+packages/*/public/assets/
+output/
+fixtures/*/public/samples/
