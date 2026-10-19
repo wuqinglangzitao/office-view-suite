@@ -256,6 +256,36 @@ export async function copyOfficeBytes(source: OfficeSource['bytes']): Promise<Ar
   }
 }
 
+interface OwnedOfficeInput {
+  bytes: ArrayBuffer;
+  format: OfficeFormat;
+}
+
+const preparedRequests = new WeakMap<OfficeOpenRequest, OwnedOfficeInput>();
+
+/** @internal Copy and inspect once before routing through the facade. */
+export async function prepareOfficeRequest(request: OfficeOpenRequest): Promise<OfficeOpenRequest & OwnedOfficeInput> {
+  const { name, format, signal } = request;
+  if (signal?.aborted) throw createOfficeViewerError('ABORTED', '打开操作已取消');
+  const bytes = await copyOfficeBytes(request.bytes);
+  if (signal?.aborted) throw createOfficeViewerError('ABORTED', '打开操作已取消');
+  const input = { bytes, format: resolveOfficeFormat(bytes, { name, format }) };
+  const prepared = Object.freeze({ ...input, name, signal });
+  preparedRequests.set(prepared, input);
+  return prepared;
+}
+
+/** @internal Claim prepared input once; otherwise inspect the copy after checking cancellation. */
+export async function takeOfficeInput(request: OfficeOpenRequest): Promise<{ bytes: ArrayBuffer; format?: OfficeFormat }> {
+  const prepared = preparedRequests.get(request);
+  if (prepared) {
+    preparedRequests.delete(request);
+    return prepared;
+  }
+  const bytes = await copyOfficeBytes(request.bytes);
+  return { bytes };
+}
+
 export function createWorkerAdapter<TDocument>(options: WorkerAdapterOptions): WorkerAdapter<TDocument> {
   type Pending = {
     id: number;
@@ -337,10 +367,10 @@ export function createWorkerAdapter<TDocument>(options: WorkerAdapterOptions): W
         };
         pending = { id, posted: false, resolve, reject, cleanup: () => request.signal?.removeEventListener('abort', onAbort) };
         request.signal?.addEventListener('abort', onAbort, { once: true });
-        void copyOfficeBytes(request.bytes).then(bytes => {
+        void takeOfficeInput(request).then(({ bytes, format }) => {
           // A Blob may finish reading after abort, replacement, or destruction.
           if (destroyed || pending?.id !== id) return;
-          const resolvedFormat = resolveOfficeFormat(bytes, request);
+          const resolvedFormat = format ?? resolveOfficeFormat(bytes, request);
           if (!allowed.includes(resolvedFormat)) {
             rejectPending(createOfficeViewerError('UNSUPPORTED_FORMAT', options.invalidNameMessage ?? '无法识别文件格式'), false);
             return;

@@ -3,16 +3,18 @@ import { readdir, mkdir, cp, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { verifyPdfiumNotices } from './verify-pdfium-notices.mjs';
 import { writeAssetManifest } from './sdk-asset-manifest.mjs';
+import { verifyWasmBuild } from './wasm-build-state.mjs';
 
 // Include the actual license/notice files of crates statically linked into WASM.
 const format = process.argv[2];
-const crate = resolve(`../../apps/${format}-view/rs`);
+await verifyWasmBuild(format);
+const crate = resolve('rs');
 const metadata = JSON.parse(execFileSync('cargo', ['metadata', '--locked', '--offline', '--format-version', '1', '--filter-platform', 'wasm32-unknown-unknown'], {
   cwd: crate, encoding: 'utf8', maxBuffer: 32 * 1024 * 1024,
 }));
 const notices = resolve('dist/licenses');
 await mkdir(notices, { recursive: true });
-const lines = ['# Bundled Rust dependencies', '', 'License files below are copied from the exact local sources used for the WASM build. Parser crates under apps/*/rs/vendor contain project modifications; their original copyright notices are preserved.', ''];
+const lines = ['# Bundled Rust dependencies', '', 'License files below are copied from the local sources whose build fingerprint is verified before SDK packaging. Parser crates under packages/viewer-*/rs/vendor contain project modifications; their original copyright notices are preserved.', ''];
 for (const pkg of metadata.packages) {
   const dir = dirname(pkg.manifest_path);
   const candidates = (await readdir(dir)).filter(name => /^(licen[cs]e|notice|copying)([.-]|$)/i.test(name));
@@ -25,7 +27,7 @@ for (const pkg of metadata.packages) {
   lines.push(`- ${pkg.name} ${pkg.version}: ${pkg.license ?? 'see source license'}; ${pkg.repository ?? pkg.source ?? 'local source'}`);
 }
 if (format === 'pdf') {
-  const source = resolve(crate, '../public/pdfium');
+  const source = resolve('../../third_party/pdfium');
   await verifyPdfiumNotices(source);
   const runtime = resolve('dist/assets/pdf/pdfium');
   for (const target of [resolve(notices, 'pdfium'), runtime]) {

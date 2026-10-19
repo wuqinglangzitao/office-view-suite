@@ -8,7 +8,7 @@ import { verifyPdfiumNotices } from './verify-pdfium-notices.mjs';
 import { verifyAssetManifest } from './sdk-asset-manifest.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-const pdfiumSource = resolve(root, 'apps/pdf-view/public/pdfium');
+const pdfiumSource = resolve(root, 'third_party/pdfium');
 const pdfium = await verifyPdfiumNotices(pdfiumSource);
 const consumer = await mkdtemp(resolve(tmpdir(), 'office-sdk-consumer-'));
 const packages = ['viewer-core', 'viewer-word', 'viewer-excel', 'viewer-ppt', 'viewer-pdf', 'viewer'];

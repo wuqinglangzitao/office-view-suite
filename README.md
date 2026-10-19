@@ -15,7 +15,7 @@
 | Word | `.doc`、`.docx`、`.docm` | DOM 渲染，渐进分页 |
 | Excel | `.xlsx`、`.xlsm` | 当前工作表懒挂载，大表可见区域渲染 |
 | PowerPoint | `.pptx` | DOM / SVG 渲染，按容器宽度适配 |
-| PDF | `.pdf` | PDFium + Canvas，按可见页面懒渲染 |
+| PDF | `.pdf` | PDFium + Canvas，按可见页面懒渲染，离屏回收位图 |
 
 不支持旧版 `.xls`、`.ppt`。预览效果受文档特性、可用字体和解析器支持范围影响，不保证与 Microsoft Office 像素级一致。
 
@@ -46,7 +46,7 @@ pnpm dev:sdk    # 构建 SDK 并启动多实例接入示例
 | PowerPoint | `pnpm dev:ppt` |
 | PDF | `pnpm dev:pdf` |
 
-这些开发命令会先构建 SDK。修改 SDK 源码后，执行 `pnpm build:sdk` 刷新演示应用使用的产物，再刷新页面。
+这些开发命令会先构建 SDK。修改 TypeScript 源码后，执行 `pnpm build:sdk` 刷新演示应用使用的产物，再刷新页面。修改 Rust、vendor、Cargo.lock、工具链声明或 WASM 构建脚本后，应先运行 `pnpm wasm`；SDK 构建会拒绝缺失、过期或被修改的 WASM 产物，并提示对应的重建命令。
 
 ## SDK 接入
 
@@ -97,14 +97,17 @@ packages/
   viewer/                    # 公共入口，按格式动态加载适配器
   viewer-core/               # 公共类型、格式识别与生命周期基础能力
   viewer-{word,excel,ppt,pdf}/ # 各格式适配器、渲染器与 Worker
-apps/*-view/                 # 演示 UI、rs/ Rust 解析器、public/ 静态资源
+    rs/                      # Rust 源码、vendor、Cargo.lock
+    src/wasm/                # wasm-pack 生成产物与构建指纹（不入库）
+third_party/pdfium/          # 上游预编译 PDFium、来源及许可材料
+apps/*-view/                 # 演示 UI 和 public/samples 样例
 fixtures/vanilla-vite/       # 从构建产物接入 SDK 的多实例示例
 tests/                      # SDK 回归测试
 scripts/                    # 构建、许可收集和安装包验证
 docs/sdk.md                 # 接入与部署说明
 ```
 
-SDK 运行时代码位于 `packages/`；文件选择等演示交互位于 `apps/`。贡献约定见 [AGENTS.md](AGENTS.md)。
+SDK 源码和引擎构建归属 `packages/`，构建不依赖演示应用目录；文件选择等演示交互位于 `apps/`。应用最终 `dist/assets/` 中的 WASM 是正常部署资源。PDFium 本体由上游编译，`pnpm wasm:pdf` 只构建本项目 Rust glue。贡献约定见 [AGENTS.md](AGENTS.md)。
 
 ## 开发与验证
 
@@ -114,10 +117,11 @@ SDK 运行时代码位于 `packages/`；文件选择等演示交互位于 `apps/
 | `pnpm build:sdk` | 仅构建六个 SDK 包 |
 | `pnpm typecheck` | 检查整个工作区的 TypeScript 类型 |
 | `pnpm test` | 运行 Node.js SDK 回归测试 |
+| `pnpm test:rust` | 运行 Word、Excel、PPT crate 的原生单元测试 |
 | `pnpm test:packages` | 打包、核对许可材料，在独立临时项目安装并构建 |
 | `pnpm test:excel` | Excel 大表性能、工作表切换与布局回归（需要 Playwright） |
 | `pnpm verify:pdfium` | 离线核对 PDFium 二进制、许可文本哈希和组件引用 |
-| `pnpm wasm` | 重建所有 Rust/WASM 产物 |
+| `pnpm wasm` | 以锁定依赖构建所有 Rust/WASM，并记录输入与产物指纹 |
 
 验证前先完成构建；类型检查和部分测试依赖 `dist/`，不要与构建并行执行：
 
@@ -125,6 +129,7 @@ SDK 运行时代码位于 `packages/`；文件选择等演示交互位于 `apps/
 pnpm build
 pnpm typecheck
 pnpm test
+pnpm test:rust
 pnpm test:packages
 ```
 
@@ -136,13 +141,13 @@ pnpm test:packages
 
 | 用途 | 依赖 | 版本 | 许可证 |
 | --- | --- | --- | --- |
-| Word 解析 | [rwml](https://github.com/HyunjoJung/rwml) | `0.1.4` | [MIT](apps/word-view/rs/vendor/rwml/LICENSE) |
-| Excel 解析 | [umya-spreadsheet](https://github.com/MathNya/umya-spreadsheet) | `3.1.1` | [MIT](apps/excel-view/rs/vendor/umya-spreadsheet/LICENSE) |
-| PPT XML 工具 | [ppt-rs](https://github.com/yingkitw/ppt-rs) | `0.2.36` | [Apache-2.0](apps/ppt-view/rs/vendor/ppt-rs/LICENSE) |
+| Word 解析 | [rwml](https://github.com/HyunjoJung/rwml) | `0.1.4` | [MIT](packages/viewer-word/rs/vendor/rwml/LICENSE) |
+| Excel 解析 | [umya-spreadsheet](https://github.com/MathNya/umya-spreadsheet) | `3.1.1` | [MIT](packages/viewer-excel/rs/vendor/umya-spreadsheet/LICENSE) |
+| PPT XML 工具 | [ppt-rs](https://github.com/yingkitw/ppt-rs) | `0.2.36` | [Apache-2.0](packages/viewer-ppt/rs/vendor/ppt-rs/LICENSE) |
 | PDF Rust 绑定 | [pdfium-render](https://github.com/ajrcarey/pdfium-render) | `0.9.4` | [MIT OR Apache-2.0](https://docs.rs/crate/pdfium-render/0.9.4) |
-| PDF 渲染引擎 | [PDFium](https://pdfium.googlesource.com/pdfium/) | `pdfium-lib 8046d` / `chromium/8046` | 主许可 BSD-3-Clause，另含 Apache-2.0 及[各组件许可](apps/pdf-view/public/pdfium/NOTICE.md) |
+| PDF 渲染引擎 | [PDFium](https://pdfium.googlesource.com/pdfium/) | `pdfium-lib 8046d` / `chromium/8046` | 主许可 BSD-3-Clause，另含 Apache-2.0 及[各组件许可](third_party/pdfium/NOTICE.md) |
 
-Word、Excel、PPT 使用 Rust/WASM 解析，再由本项目渲染器展示。PPT 基于 `ppt-rs` 的 XML 工具及 `zip` 实现自研 OOXML 解析；前三项库的内置源码位于 `apps/*-view/rs/vendor/`，包含本地修复并保留原许可证。`MIT OR Apache-2.0` 表示可选择其中一种许可。
+Word、Excel、PPT 使用 Rust/WASM 解析，再由本项目渲染器展示。PPT 基于 `ppt-rs` 的 XML 工具及 `zip` 实现自研 OOXML 解析；前三项库的内置源码位于 `packages/viewer-*/rs/vendor/`，包含本地修复并保留原许可证。`MIT OR Apache-2.0` 表示可选择其中一种许可。
 
 ### 第三方声明如何分发
 
@@ -150,9 +155,9 @@ Word、Excel、PPT 使用 Rust/WASM 解析，再由本项目渲染器展示。PP
 
 当前 PDFium 材料覆盖对应构建的解析引擎、内嵌组件及字体、Emscripten 运行库。源码提交、文件哈希和收集范围可从以下文档复核：
 
-- [第三方许可与必要署名](apps/pdf-view/public/pdfium/NOTICE.md)
-- [二进制来源与版本](apps/pdf-view/public/pdfium/SOURCE.md)
-- [构建证据与升级流程](apps/pdf-view/public/pdfium/BUILD_EVIDENCE.md)
+- [第三方许可与必要署名](third_party/pdfium/NOTICE.md)
+- [二进制来源与版本](third_party/pdfium/SOURCE.md)
+- [构建证据与升级流程](third_party/pdfium/BUILD_EVIDENCE.md)
 - [SDK 许可材料部署方式](docs/sdk.md#第三方许可随包部署)
 
 更换 PDFium 二进制时须同步复核许可材料，不能只刷新哈希。样本文档、图片等业务素材的授权需单独确认。

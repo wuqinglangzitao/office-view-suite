@@ -17,6 +17,10 @@ pnpm test:packages
 
 `pnpm test:packages` 会将六个包打成 `.tgz`，在系统临时目录建立独立项目，仅从这些安装包安装运行时依赖，再执行类型检查和生产构建。临时项目路径记录在 `output/packed-consumer.json`。在包尚未发布时，跨项目安装需要提供全部六个安装包；该脚本给出了完整的本地依赖和 `pnpm.overrides` 配置。
 
+Rust 源码和各自的 Cargo.lock 位于 `packages/viewer-{word,excel,ppt,pdf}/rs/`，生成的 WASM/glue 位于同包的 `src/wasm/`。`pnpm wasm` 使用 `--locked` 构建并记录源码、vendor、仓库 Cargo 配置、工具链声明、构建脚本及输出文件的指纹。SDK 构建会拒绝缺失或过期的产物，并提示 `pnpm wasm:<格式>`；TypeScript 修改无需重建 WASM。指纹用于防止本地源码与生成产物错配，不是跨平台逐字节可复现构建的证明。PDFium 本体是 `third_party/pdfium/` 中的上游预编译产物，`wasm:pdf` 只编译本项目 Rust glue。
+
+`pnpm test` 包含真实 Word/Excel/PPT WASM 输出与当前 TypeScript 模型的契约验证；`pnpm test:rust` 运行这三个 crate 的原生单元测试。PDF glue 的运行验证在浏览器回归中完成。
+
 | 包 | 职责 |
 | --- | --- |
 | `@office-view-suite/viewer` | 推荐的公共入口，按格式动态加载 |
@@ -57,6 +61,8 @@ React/Vue 等框架在挂载后创建实例，在卸载时调用 `destroy()` 即
 `open({ bytes, name?, format?, signal? })` 支持 `.doc/.docx/.docm`、`.xlsx/.xlsm`、`.pptx`、`.pdf`。先检查文件内容，再选择解析器；例如 XLSX 误命名为 `.pdf` 仍按 Excel 打开。显式 `format` 与识别到的格式家族冲突时返回 `INVALID_SOURCE`。同一 OOXML 家族的 `.docx/.docm`、`.xlsx/.xlsm` 可由显式格式或文件名细化标记，因为宏格式不一定包含 VBA 条目。
 
 预检只检查 PDF 标识、Office ZIP/ZIP64 目录边界与主条目、Word 复合文档标识，不解压或验证完整文档语义。明确损坏的容器或与声明格式不符的内容返回 `INVALID_SOURCE`，未识别且没有受支持格式提示的内容返回 `UNSUPPORTED_FORMAT`；深层损坏仍由解析器返回 `PARSE_FAILED`。不支持 `.xls/.ppt`，指定 `format` 不能绕过预检。
+
+公共入口取得输入副本并预检一次，再将内部持有的 buffer 交给对应 Worker；不会 detach 调用者的 ArrayBuffer 或 Uint8Array。PDF 仅保留视口及约 300px 预加载区域内的页面位图，离屏保留布局占位，返回时重绘。没有 IntersectionObserver 时仍使用全量绘制降级路径；这项优化不限制 PDF 引擎自身的文档内存。
 
 SDK 复制文件数据，传给 Worker 后不会分离调用方的 ArrayBuffer。结果包含 `format`、`durationMs`、`warnings: Array<{code,message}>` 和格式相关的 `stats`；PPT/PDF 提供 `pageCount`，Excel 提供 `itemCount`。Word 分页渐进完成，当前不提供最终页数。`open()` 表示文档已解析并挂载；Word 后续分页和 PDF 可视页渲染仍可能继续。
 
@@ -188,7 +194,7 @@ workerBlobs.forEach(url => URL.revokeObjectURL(url));
 - `dist/licenses/pdfium/`：来源记录、构建证据、组件清单、哈希清单及许可证正文。
 - `dist/assets/pdf/pdfium/`：JS/WASM 旁保留相同材料；按本文复制整个 `dist/assets/` 目录时，声明会一同部署。
 
-PDFium 许可涵盖 PDFium 及内嵌组件、字体、Emscripten 运行库和启用的 ports。署名和完整原文见 [NOTICE.md](../apps/pdf-view/public/pdfium/NOTICE.md)；构建追溯见 [BUILD_EVIDENCE.md](../apps/pdf-view/public/pdfium/BUILD_EVIDENCE.md)。其中包含 IJG 和 FreeType 要求的产品文档署名，分发时应保留。
+PDFium 许可涵盖 PDFium 及内嵌组件、字体、Emscripten 运行库和启用的 ports。署名和完整原文见 [NOTICE.md](../third_party/pdfium/NOTICE.md)；构建追溯见 [BUILD_EVIDENCE.md](../third_party/pdfium/BUILD_EVIDENCE.md)。其中包含 IJG 和 FreeType 要求的产品文档署名，分发时应保留。
 
 若使用 Vite 等工具仅打包被代码引用的资源，许可证文档不会因此自动进入最终网站。宿主应用需另外部署各适配器的 `dist/THIRD_PARTY_NOTICES.md` 和 `dist/licenses/`，并从“关于 / 开源许可”页提供访问；SDK 二次分发也应保留这些材料。无须在每个预览页面展示全文。
 

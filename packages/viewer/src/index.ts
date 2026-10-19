@@ -1,8 +1,7 @@
 import {
-  copyOfficeBytes,
   createOfficeViewerError,
   inferOfficeFormat,
-  resolveOfficeFormat,
+  prepareOfficeRequest,
   type OfficeFormat,
   type OfficeOpenRequest,
   type OfficeOpenResult,
@@ -218,11 +217,11 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
         if (explicit !== undefined && !inferOfficeFormat(undefined, explicit)) {
           throw createOfficeViewerError('UNSUPPORTED_FORMAT', '不支持此文件格式');
         }
-        const bytes = await untilAborted(copyOfficeBytes(request.bytes), session.signal);
-        const format = resolveOfficeFormat(bytes, { name: request.name, format: explicit });
+        const prepared = await untilAborted(prepareOfficeRequest({ ...request, format: explicit, signal: session.signal }), session.signal);
+        const format = prepared.format;
         const adapter = await untilAborted(getAdapter(format), session.signal);
         if (session.signal.aborted) throw abortError(session.signal);
-        const result = await untilAborted(adapter.open({ ...request, bytes, format, signal: session.signal }), session.signal);
+        const result = await untilAborted(adapter.open(prepared), session.signal);
         if (session.signal.aborted) throw abortError(session.signal);
         if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
         currentAdapter = adapter;

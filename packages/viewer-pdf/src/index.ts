@@ -1,5 +1,5 @@
 import {
-  copyOfficeBytes,
+  takeOfficeInput,
   createOfficeViewerError,
   resolveOfficeFormat,
   type OfficeAssetOptions,
@@ -182,9 +182,10 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
       };
       request.signal?.addEventListener('abort', abort, { once: true });
       try {
-        const bytes = await Promise.race([copyOfficeBytes(request.bytes), cancelled]);
+        const input = await Promise.race([takeOfficeInput(request), cancelled]);
         assertCurrent(session);
-        const format = resolveOfficeFormat(bytes, { name: request.name, format: request.format ?? options.format });
+        const { bytes } = input;
+        const format = input.format ?? resolveOfficeFormat(bytes, { name: request.name, format: request.format ?? options.format });
         if (format !== 'pdf') throw createOfficeViewerError('UNSUPPORTED_FORMAT', 'PDF adapter 仅支持 PDF 文件');
         const response = await send(session, 'open', { bytes }, [bytes]);
         assertCurrent(session);
@@ -225,6 +226,8 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
       let errorReported = false;
       const pageStates = doc.pages.map((size, page) => {
         const canvas = document.createElement('canvas');
+        canvas.width = 0;
+        canvas.height = 0;
         canvas.className = 'page';
         canvas.dataset.page = String(page);
         canvas.setAttribute('aria-label', `第 ${page + 1} 页`);
@@ -234,13 +237,20 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
       type PageState = typeof pageStates[number];
       const alive = () => !disposed && !destroyed && current === session;
 
+      const releaseBitmap = (state: PageState): void => {
+        // Explicit CSS dimensions keep the scroll layout stable without pixels.
+        state.canvas.width = 0;
+        state.canvas.height = 0;
+        state.paintedWidth = 0;
+      };
+
       async function paint(state: PageState): Promise<void> {
         if (!alive() || state.rendering || !state.visible || state.paintedWidth === state.wantedWidth) return;
         state.rendering = true;
         const width = state.wantedWidth;
         try {
           const response = await send(session!, 'render', { page: state.page, width });
-          if (!alive()) return;
+          if (!alive() || !state.visible) return;
           if (response.type !== 'page' || response.page !== state.page) {
             throw createOfficeViewerError('RENDER_FAILED', 'PDF 页面渲染响应无效');
           }
@@ -252,11 +262,12 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
             if (!context) throw createOfficeViewerError('RENDER_FAILED', '无法创建 PDF Canvas 上下文');
             context.putImageData(response.image, 0, 0);
             state.paintedWidth = width;
+            delete state.canvas.dataset.error;
           }
         } catch (error) {
           if (!alive()) return;
           // Mark this size as attempted so failed pages do not retry forever.
-          state.paintedWidth = width;
+          state.paintedWidth = state.visible ? width : 0;
           state.canvas.dataset.error = errorMessage(error);
           if (!errorReported) {
             errorReported = true;
@@ -288,6 +299,7 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
           if (!state) continue;
           state.visible = entry.isIntersecting;
           if (state.visible) void paint(state);
+          else releaseBitmap(state);
         }
       }, { rootMargin: '300px' });
       layout();
@@ -306,6 +318,7 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
           disposed = true;
           observer?.disconnect();
           if (frame) cancelAnimationFrame(frame);
+          for (const state of pageStates) releaseBitmap(state);
           for (const [id, request] of pending) {
             if (request.session === session && request.type === 'render') {
               hasCancelledRenders = true;

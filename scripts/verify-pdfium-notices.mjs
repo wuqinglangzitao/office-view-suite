@@ -3,7 +3,7 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const sourceDirectory = fileURLToPath(new URL('../apps/pdf-view/public/pdfium/', import.meta.url));
+const sourceDirectory = fileURLToPath(new URL('../third_party/pdfium/', import.meta.url));
 const binaryNames = ['pdfium.std.js', 'pdfium.std.wasm'];
 const sha256Pattern = /^[a-f0-9]{64}$/;
 

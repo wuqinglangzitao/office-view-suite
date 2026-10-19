@@ -10,6 +10,7 @@ const ts = require('typescript');
 const compile = source => ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
 const asModule = source => `data:text/javascript;base64,${Buffer.from(source).toString('base64')}`;
 const coreUrl = asModule(compile(await readFile(new URL('../packages/viewer-core/src/index.ts', import.meta.url), 'utf8')));
+const { prepareOfficeRequest } = await import(coreUrl);
 const pdfUrl = new URL('../packages/viewer-pdf/src/index.ts', import.meta.url);
 const { createPdfAdapter } = await import(asModule(compile(await readFile(pdfUrl, 'utf8'))
   .replaceAll("'@office-view-suite/viewer-core'", JSON.stringify(coreUrl))
@@ -37,11 +38,11 @@ function setup(options = {}) {
   } });
   return { adapter, workers, calls };
 }
-async function openPdf(adapter, workers) {
+async function openPdf(adapter, workers, pages = [{ wPt: 400, hPt: 600 }]) {
   const promise = adapter.open({ bytes: bytes(), format: 'pdf' });
   await tick();
   const worker = workers.at(-1);
-  worker.respond(worker.messages.at(-1), { type: 'meta', pages: [{ wPt: 400, hPt: 600 }] });
+  worker.respond(worker.messages.at(-1), { type: 'meta', pages });
   return promise;
 }
 
@@ -80,6 +81,33 @@ test('PDF honors worker URL override without custom workerFactory', async () => 
     await opening;
     adapter.destroy();
   } finally { globalThis.Worker = previous; }
+});
+
+test('PDF transfers the facade-owned input without copying it again', async () => {
+  const { adapter, workers } = setup();
+  try {
+    const original = bytes();
+    const prepared = await prepareOfficeRequest({ bytes: original, format: 'pdf' });
+    const opening = adapter.open(prepared);
+    await tick();
+    const message = workers[0].messages[0];
+    assert.equal(message.bytes, prepared.bytes);
+    assert.notEqual(message.bytes, original.buffer);
+    structuredClone(message.bytes, { transfer: [message.bytes] });
+    assert.equal(prepared.bytes.byteLength, 0);
+    assert.equal(original.byteLength, 5);
+    workers[0].respond(message, { type: 'meta', pages: [] });
+    await opening;
+  } finally { adapter.destroy(); }
+});
+
+test('PDF direct requests still apply the configured default format', async () => {
+  const { adapter, workers } = setup({ format: 'docx' });
+  try {
+    await assert.rejects(adapter.open({ bytes: bytes() }), { code: 'UNSUPPORTED_FORMAT' });
+    assert.equal(workers.length, 0);
+    await openPdf(adapter, workers);
+  } finally { adapter.destroy(); }
 });
 
 test('pre-abort and invalid input create no worker', async () => {
@@ -166,10 +194,13 @@ function installDom() {
   globalThis.devicePixelRatio = 2;
   globalThis.IntersectionObserver = class {
     elements = [];
-    constructor(callback) { this.callback = callback; observers.push(this); }
+    constructor(callback, options) { this.callback = callback; this.options = options; observers.push(this); }
     observe(element) { this.elements.push(element); }
     disconnect() { this.disconnected = true; }
     show() { this.callback(this.elements.map(target => ({ target, isIntersecting: true }))); }
+    setVisible(indices) {
+      this.callback(this.elements.map((target, index) => ({ target, isIntersecting: indices.includes(index) })));
+    }
   };
   globalThis.requestAnimationFrame = callback => setTimeout(callback, 0);
   globalThis.cancelAnimationFrame = clearTimeout;
@@ -202,6 +233,8 @@ test('PDF canvas sizing and resize preserve elements; disposal ignores late pain
     const resized = worker.messages.at(-1);
     assert.equal(resized.width, 800);
     handle.dispose();
+    assert.equal(canvas.width, 0);
+    assert.equal(canvas.height, 0);
     adapter.clear();
     assert.equal(worker.terminated, true);
     worker.respond(resized, { type: 'page', page: 0, image: { width: 800, height: 1200 } });
@@ -209,6 +242,146 @@ test('PDF canvas sizing and resize preserve elements; disposal ignores late pain
     assert.equal(canvas.paints, 1);
     assert.equal(dom.observers[0].disconnected, true);
     assert.equal(host.shadowRoot.children.length, 0);
+  } finally { adapter.destroy(); dom.restore(); }
+});
+
+test('PDF keeps only visible page bitmaps while preserving offscreen layout and rerenders on return', async () => {
+  const dom = installDom();
+  const { adapter, workers } = setup();
+  try {
+    const result = await openPdf(adapter, workers, Array.from({ length: 12 }, () => ({ wPt: 400, hPt: 600 })));
+    const host = new Element();
+    const handle = adapter.render(host, result.document);
+    const pages = host.shadowRoot.children[1];
+    const observer = dom.observers[0];
+    const worker = workers[0];
+    assert.equal(observer.options.rootMargin, '300px');
+    assert.ok(pages.children.every(canvas => canvas.width === 0 && canvas.height === 0));
+    for (const page of [...pages.children.keys(), 0]) {
+      observer.setVisible([page]);
+      const request = worker.messages.at(-1);
+      assert.equal(request.type, 'render');
+      assert.equal(request.page, page);
+      worker.respond(request, { type: 'page', page, image: { width: 1200, height: 1800 } });
+      await tick();
+      assert.equal(pages.children.reduce((pixels, canvas) => pixels + canvas.width * canvas.height, 0), 1200 * 1800);
+      for (const canvas of pages.children) {
+        assert.equal(canvas.style.width, '600px');
+        assert.equal(canvas.style.height, '900px');
+      }
+    }
+    assert.equal(pages.children[0].paints, 2);
+    handle.dispose();
+    assert.ok(pages.children.every(canvas => canvas.width === 0 && canvas.height === 0));
+  } finally { adapter.destroy(); dom.restore(); }
+});
+
+test('PDF discards a page response after it leaves the preload region', async () => {
+  const dom = installDom();
+  const { adapter, workers } = setup();
+  try {
+    const result = await openPdf(adapter, workers);
+    const host = new Element();
+    adapter.render(host, result.document);
+    const canvas = host.shadowRoot.children[1].children[0];
+    const observer = dom.observers[0];
+    const worker = workers[0];
+    observer.setVisible([0]);
+    const stale = worker.messages.at(-1);
+    observer.setVisible([]);
+    worker.respond(stale, { type: 'page', page: 0, image: { width: 1200, height: 1800 } });
+    await tick();
+    assert.equal(canvas.paints, 0);
+    assert.equal(canvas.width, 0);
+    assert.equal(canvas.height, 0);
+    observer.setVisible([0]);
+    const current = worker.messages.at(-1);
+    assert.notEqual(current.id, stale.id);
+    worker.respond(current, { type: 'page', page: 0, image: { width: 1200, height: 1800 } });
+    await tick();
+    assert.equal(canvas.paints, 1);
+    assert.equal(canvas.width, 1200);
+  } finally { adapter.destroy(); dom.restore(); }
+});
+
+test('PDF reentry during an in-flight render uses the latest layout without duplicate requests', async () => {
+  const dom = installDom();
+  const { adapter, workers } = setup();
+  try {
+    const result = await openPdf(adapter, workers);
+    const host = new Element();
+    const handle = adapter.render(host, result.document);
+    const pages = host.shadowRoot.children[1];
+    const canvas = pages.children[0];
+    const observer = dom.observers[0];
+    const worker = workers[0];
+    observer.setVisible([0]);
+    const stale = worker.messages.at(-1);
+    observer.setVisible([]);
+    pages.clientWidth = 432;
+    handle.resize();
+    await new Promise(resolve => setTimeout(resolve, 5));
+    observer.setVisible([0]);
+    assert.equal(worker.messages.filter(message => message.type === 'render').length, 1);
+    worker.respond(stale, { type: 'page', page: 0, image: { width: 1200, height: 1800 } });
+    await tick();
+    assert.equal(canvas.paints, 0);
+    const current = worker.messages.at(-1);
+    assert.equal(current.width, 800);
+    worker.respond(current, { type: 'page', page: 0, image: { width: 800, height: 1200 } });
+    await tick();
+    assert.equal(canvas.paints, 1);
+    assert.equal(canvas.width, 800);
+    assert.equal(canvas.style.width, '400px');
+  } finally { adapter.destroy(); dom.restore(); }
+});
+
+test('PDF still renders without IntersectionObserver and releases bitmaps on disposal', async () => {
+  const dom = installDom();
+  globalThis.IntersectionObserver = undefined;
+  const { adapter, workers } = setup();
+  try {
+    const result = await openPdf(adapter, workers, [{ wPt: 400, hPt: 600 }, { wPt: 600, hPt: 400 }]);
+    const host = new Element();
+    const handle = adapter.render(host, result.document);
+    const canvases = host.shadowRoot.children[1].children;
+    const worker = workers[0];
+    const requests = worker.messages.filter(message => message.type === 'render');
+    assert.equal(requests.length, 2);
+    for (const request of requests) worker.respond(request, { type: 'page', page: request.page, image: { width: 1200, height: 1800 } });
+    await tick();
+    assert.ok(canvases.every(canvas => canvas.paints === 1 && canvas.width === 1200));
+    handle.dispose();
+    assert.ok(canvases.every(canvas => canvas.width === 0 && canvas.height === 0));
+  } finally { adapter.destroy(); dom.restore(); }
+});
+
+test('PDF retries an evicted failed page on reentry without retrying continuously', async () => {
+  const dom = installDom();
+  const { adapter, workers } = setup();
+  try {
+    const result = await openPdf(adapter, workers);
+    const errors = [];
+    const host = new Element();
+    adapter.render(host, result.document, error => errors.push(error));
+    const canvas = host.shadowRoot.children[1].children[0];
+    const observer = dom.observers[0];
+    const worker = workers[0];
+    observer.setVisible([0]);
+    const failed = worker.messages.at(-1);
+    worker.respond(failed, { type: 'error', code: 'RENDER_FAILED', message: 'bad page' });
+    await tick();
+    observer.setVisible([0]);
+    assert.equal(worker.messages.at(-1), failed);
+    assert.equal(errors.length, 1);
+    observer.setVisible([]);
+    observer.setVisible([0]);
+    const retry = worker.messages.at(-1);
+    assert.notEqual(retry.id, failed.id);
+    worker.respond(retry, { type: 'page', page: 0, image: { width: 1200, height: 1800 } });
+    await tick();
+    assert.equal(canvas.paints, 1);
+    assert.equal(canvas.dataset.error, undefined);
   } finally { adapter.destroy(); dom.restore(); }
 });
 

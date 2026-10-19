@@ -17,7 +17,7 @@
   "scripts": {
     "build": "node ../../scripts/prepare-sdk-assets.mjs pdf && vite build && tsc -p tsconfig.build.json && node ../../scripts/collect-sdk-notices.mjs pdf",
     "typecheck": "tsc --noEmit",
-    "wasm": "pnpm --filter pdf-view wasm"
+    "wasm": "node ../../scripts/build-wasm.mjs pdf"
   },
   "dependencies": {
     "@office-view-suite/viewer-core": "workspace:*"

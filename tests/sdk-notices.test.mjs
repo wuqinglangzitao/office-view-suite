@@ -7,7 +7,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { verifyPdfiumNotices } from '../scripts/verify-pdfium-notices.mjs';
 
-const source = fileURLToPath(new URL('../apps/pdf-view/public/pdfium/', import.meta.url));
+const source = fileURLToPath(new URL('../third_party/pdfium/', import.meta.url));
 const distribution = fileURLToPath(new URL('../packages/viewer-pdf/dist/', import.meta.url));
 const hash = contents => createHash('sha256').update(contents).digest('hex');
 

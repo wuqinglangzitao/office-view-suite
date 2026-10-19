@@ -80,6 +80,55 @@ try {
     }, kind);
     results.push({ test: `preview-zoom-${kind}`, ...zoom });
   }
+  // Exercise real IntersectionObserver clipping, bitmap eviction and repainting.
+  await page.evaluate(async () => {
+    const host = document.querySelector('#viewer');
+    host.style.height = '400px';
+    host.style.minHeight = '0';
+    host.style.overflow = 'auto';
+    window.scrollTo(0, 0);
+    await window.officeFixture.viewer.open(await window.officeFixture.sample('pdf'));
+  });
+  await page.waitForFunction(() => {
+    const canvases = document.querySelector('#viewer .office-viewer-surface').shadowRoot.querySelectorAll('canvas');
+    return canvases.length === 2 && canvases[0].width > 300 && canvases[1].width === 0;
+  });
+  const firstPage = await page.evaluate(() => {
+    const host = document.querySelector('#viewer');
+    const canvas = host.querySelector('.office-viewer-surface').shadowRoot.querySelector('canvas');
+    const snapshot = { pixels: canvas.toDataURL(), height: host.scrollHeight, cssWidth: canvas.style.width, cssHeight: canvas.style.height };
+    host.scrollTop = host.scrollHeight;
+    return snapshot;
+  });
+  await page.waitForFunction(() => {
+    const canvases = document.querySelector('#viewer .office-viewer-surface').shadowRoot.querySelectorAll('canvas');
+    return canvases[0].width === 0 && canvases[0].height === 0 && canvases[1].width > 300;
+  });
+  await page.evaluate(first => {
+    const host = document.querySelector('#viewer');
+    const canvas = host.querySelector('.office-viewer-surface').shadowRoot.querySelector('canvas');
+    if (host.scrollHeight !== first.height || canvas.style.width !== first.cssWidth || canvas.style.height !== first.cssHeight) {
+      throw new Error('PDF eviction changed scroll layout');
+    }
+    host.scrollTop = 0;
+  }, { height: firstPage.height, cssWidth: firstPage.cssWidth, cssHeight: firstPage.cssHeight });
+  await page.waitForFunction(() => {
+    const canvases = document.querySelector('#viewer .office-viewer-surface').shadowRoot.querySelectorAll('canvas');
+    return canvases[0].width > 300 && canvases[1].width === 0;
+  });
+  const cache = await page.evaluate(firstPixels => {
+    const host = document.querySelector('#viewer');
+    const canvases = [...host.querySelector('.office-viewer-surface').shadowRoot.querySelectorAll('canvas')];
+    if (canvases[0].toDataURL() !== firstPixels) throw new Error('PDF repaint changed page pixels');
+    const retained = canvases.filter(canvas => canvas.width > 0).length;
+    window.officeFixture.viewer.clear();
+    if (canvases.some(canvas => canvas.width || canvas.height)) throw new Error('PDF clear retained pixel storage');
+    host.style.removeProperty('height');
+    host.style.removeProperty('min-height');
+    host.style.removeProperty('overflow');
+    return { pages: canvases.length, retained, pixelsMatch: true };
+  }, firstPage.pixels);
+  results.push({ test: 'pdf-bitmap-eviction-and-repaint', ...cache });
   results.push(await page.evaluate(async () => {
     const f = window.officeFixture;
     const word = await f.sample('word'), ppt = await f.sample('ppt');

@@ -17,7 +17,7 @@
   "scripts": {
     "build": "node ../../scripts/prepare-sdk-assets.mjs ppt && vite build && tsc -p tsconfig.build.json && node ../../scripts/collect-sdk-notices.mjs ppt",
     "typecheck": "tsc --noEmit",
-    "wasm": "pnpm --filter ppt-view wasm"
+    "wasm": "node ../../scripts/build-wasm.mjs ppt"
   },
   "dependencies": {
     "@office-view-suite/viewer-core": "workspace:*"
