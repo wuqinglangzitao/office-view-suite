@@ -1,6 +1,8 @@
 import { formatValue } from './format';
 import { SHADOW_CSS } from './styles';
-import type { ExcelCell, ExcelDoc, ExcelRichTextRun, ExcelShape, ExcelSheet } from './types';
+import { parseRange, RangeIndex, sheetBounds } from './layout';
+import { renderVirtualSheet, VIRTUAL_CELL_THRESHOLD, type SheetView, type VirtualCache } from './virtual';
+import type { ExcelCell, ExcelDoc, ExcelImage, ExcelRichTextRun, ExcelShape, ExcelSheet } from './types';
 
 /** 默认列宽换算:Excel 字符单位 → px(Calibri 11 近似) */
 const DEFAULT_COL_PX = 96;
@@ -28,12 +30,13 @@ export interface RenderStats {
 }
 
 /**
- * 网格渲染:完整网格(每格有边框)+ 合并 span + 列宽行高 + 全样式映射。
- * Shadow DOM 隔离;工作表逐个挂载(单元格量小,无需分批)。
+ * Mount only the active worksheet. Small sheets retain their content-driven grid;
+ * large sheets use a stable layout and a window bounded by the scroll viewport.
  */
-export function renderExcelInto(host: HTMLElement, doc: ExcelDoc): {
+export function renderExcelInto(host: HTMLElement, doc: ExcelDoc, onError?: (error: Error) => void, onContentChange?: () => void): {
   stats: RenderStats;
   resize(): void;
+  getContentWidth(): number;
   dispose(): void;
 } {
   const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
@@ -59,23 +62,52 @@ export function renderExcelInto(host: HTMLElement, doc: ExcelDoc): {
   let merges = 0;
   let images = 0;
   let shapes = 0;
-  const sections: HTMLElement[] = [];
   const buttons: HTMLButtonElement[] = [];
+  const positions = new Map<number, { top: number; left: number }>();
+  const caches = new Map<number, VirtualCache>();
+  let current = -1;
+  let active: SheetView | undefined;
+  let disposed = false;
+
+  const mount = (index: number) => {
+    if (disposed || index === current || !doc.sheets[index]) return;
+    const previous = active;
+    if (active) {
+      positions.set(current, { top: active.viewport.scrollTop, left: active.viewport.scrollLeft });
+    }
+    const cache = caches.get(index) ?? {};
+    caches.set(index, cache);
+    let next: SheetView | undefined;
+    try {
+      next = renderSheet(doc.sheets[index], cache, onError, onContentChange);
+      next.element.dataset.sheetIndex = String(index);
+      sheets.replaceChildren(next.element);
+      next.resize();
+      const position = positions.get(index);
+      if (position) {
+        next.viewport.scrollTop = position.top;
+        next.viewport.scrollLeft = position.left;
+        next.resize();
+      }
+    } catch (error) {
+      next?.dispose();
+      if (previous) sheets.replaceChildren(previous.element);
+      throw error;
+    }
+    previous?.dispose();
+    active = next;
+    current = index;
+    buttons.forEach((button, i) => button.setAttribute('aria-selected', String(i === index)));
+    if (previous) onContentChange?.();
+  };
   doc.sheets.forEach((sheet, index) => {
-    const section = renderSheet(sheet);
-    section.hidden = index !== 0;
-    sections.push(section);
-    sheets.appendChild(section);
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'sheet-tab';
     button.textContent = sheet.name;
+    button.dataset.sheetIndex = String(index);
     button.setAttribute('role', 'tab');
     button.setAttribute('aria-selected', index === 0 ? 'true' : 'false');
-    button.addEventListener('click', () => {
-      sections.forEach((item, itemIndex) => { item.hidden = itemIndex !== index; });
-      buttons.forEach((item, itemIndex) => item.setAttribute('aria-selected', itemIndex === index ? 'true' : 'false'));
-    });
     buttons.push(button);
     tabs.appendChild(button);
     rows += sheet.highestRow;
@@ -86,31 +118,50 @@ export function renderExcelInto(host: HTMLElement, doc: ExcelDoc): {
   });
 
 
+  const switchSheet = (event: MouseEvent) => {
+    const button = (event.target as HTMLElement).closest<HTMLButtonElement>('.sheet-tab');
+    if (button) {
+      try { mount(Number(button.dataset.sheetIndex)); }
+      catch (error) {
+        if (onError) onError(error instanceof Error ? error : new Error(String(error)));
+        else throw error;
+      }
+    }
+  };
+  const invalidateFonts = () => { for (const cache of caches.values()) cache.layout = undefined; };
+  tabs.addEventListener('click', switchSheet);
+  host.ownerDocument.fonts?.addEventListener('loadingdone', invalidateFonts);
+  try { mount(0); }
+  catch (error) {
+    tabs.removeEventListener('click', switchSheet);
+    host.ownerDocument.fonts?.removeEventListener('loadingdone', invalidateFonts);
+    root.remove(); style.remove();
+    throw error;
+  }
+
   return {
     stats: { sheets: doc.sheets.length, rows, cols, merges, images, shapes },
-    // CSS handles the viewport; rebuilding would reset sheet selection and scroll.
-    resize() {},
+    resize() { if (!disposed) active?.resize(); },
+    getContentWidth() { return disposed ? 0 : active?.getContentWidth() ?? 0; },
     dispose() {
+      disposed = true;
+      active?.dispose();
+      active = undefined;
+      tabs.removeEventListener('click', switchSheet);
+      host.ownerDocument.fonts?.removeEventListener('loadingdone', invalidateFonts);
+      caches.clear();
+      positions.clear();
       root.remove();
       style.remove();
     },
   };
 }
 
-function parseRange(range: string): { c1: number; r1: number; c2: number; r2: number } {
-  const [a, b] = range.split(':');
-  const m = (s: string) => {
-    const t = s.match(/^([A-Z]+)(\d+)$/)!;
-    let c = 0;
-    for (const ch of t[1]) c = c * 26 + (ch.charCodeAt(0) - 64);
-    return { c, r: Number(t[2]) };
-  };
-  const x = m(a);
-  const y = b ? m(b) : x;
-  return { c1: x.c, r1: x.r, c2: y.c, r2: y.r };
-}
-
-function renderSheet(sheet: ExcelSheet): HTMLElement {
+function renderSheet(sheet: ExcelSheet, cache: VirtualCache, onError?: (error: Error) => void, onContentChange?: () => void): SheetView {
+  const bounds = sheetBounds(sheet);
+  const virtual = bounds.rows * bounds.cols > VIRTUAL_CELL_THRESHOLD;
+  // Small sheets retain CSS implicit tracks for merges beyond the populated cells.
+  if (virtual) sheet = { ...sheet, highestRow: bounds.rows, highestCol: bounds.cols };
   const section = document.createElement('section');
   section.className = 'sheet';
   const title = document.createElement('h2');
@@ -121,6 +172,13 @@ function renderSheet(sheet: ExcelSheet): HTMLElement {
   wrap.className = 'grid-wrap';
   const grid = document.createElement('div');
   grid.className = 'grid';
+  wrap.appendChild(grid);
+  section.appendChild(wrap);
+  if (virtual) {
+    return renderVirtualSheet(sheet, section, wrap, grid, cache, {
+      cell: renderCell, image: renderImage, shape: renderShape,
+    }, onError, onContentChange);
+  }
   // 网格本体补左/顶边框,单元格画右/下,形成完整栅格
   const colPx = (c: number) => {
     const dim = sheet.colWidths.find(w => w.col === c);
@@ -140,29 +198,27 @@ function renderSheet(sheet: ExcelSheet): HTMLElement {
     return wrapCols.has(c) ? `${colPx(c)}px` : `minmax(${colPx(c)}px, max-content)`;
   }).join(' ');
 
-  // 合并区 → span + 覆盖集合
-  const covered = new Set<string>();
+  // 合并区保留矩形索引，不展开为每个被覆盖单元格。
+  const mergedRanges = sheet.merges.map(parseRange);
+  const mergeIndex = new RangeIndex(mergedRanges);
   const spanOf = new Map<string, { cs: number; rs: number }>();
-  for (const range of sheet.merges) {
-    const { c1, r1, c2, r2 } = parseRange(range);
+  for (const { c1, r1, c2, r2 } of mergedRanges) {
     spanOf.set(`${c1}:${r1}`, { cs: c2 - c1 + 1, rs: r2 - r1 + 1 });
-    for (let r = r1; r <= r2; r++) {
-      for (let c = c1; c <= c2; c++) {
-        if (!(r === r1 && c === c1)) covered.add(`${c}:${r}`);
-      }
-    }
   }
 
   const byKey = new Map(sheet.cells.map(c => [`${c.col}:${c.row}`, c]));
   const wrapRows = new Set<number>();
   const explicitRowPx = new Set<number>();
   for (let r = 1; r <= sheet.highestRow; r++) {
+    const covered = mergeIndex.intersect({ c1: 1, c2: sheet.highestCol, r1: r, r2: r }).sort((a, b) => a.c1 - b.c1);
+    let rangeIndex = 0;
     for (let c = 1; c <= sheet.highestCol; c++) {
+      while (rangeIndex < covered.length && covered[rangeIndex].c2 < c) rangeIndex++;
+      const merged = covered[rangeIndex];
+      if (merged?.c1 <= c && !(r === merged.r1 && c === merged.c1)) { c = merged.c2; continue; }
       const key = `${c}:${r}`;
-      if (covered.has(key)) continue;
       const cell = byKey.get(key);
-      const el = document.createElement('div');
-      el.className = 'cell';
+      const el = renderCell(cell, r, c);
       el.style.gridColumn = `${c}`;
       el.style.gridRow = `${r}`;
       const span = spanOf.get(key);
@@ -170,10 +226,7 @@ function renderSheet(sheet: ExcelSheet): HTMLElement {
         if (span.cs > 1) el.style.gridColumn = `${c} / span ${span.cs}`;
         if (span.rs > 1) el.style.gridRow = `${r} / span ${span.rs}`;
       }
-      if (cell?.richText?.length) renderRichText(el, cell.richText);
-      else el.textContent = cell ? formatValue(cell.value, cell.numfmt) : '';
       if (cell) {
-        applyCellStyle(el, cell);
         if (cell.wrapText) {
           // Excel 自动换行:多行显示;行高仅在文档未显式设定时自适应
           el.style.whiteSpace = 'normal';
@@ -202,22 +255,7 @@ function renderSheet(sheet: ExcelSheet): HTMLElement {
   }
 
   for (const source of sheet.images) {
-    const frame = document.createElement('div');
-    frame.className = source.fitCell ? 'sheet-image sheet-image-cell' : 'sheet-image';
-    frame.style.gridColumn = source.toCol
-      ? `${source.col} / span ${Math.max(1, source.toCol - source.col + 1)}`
-      : `${source.col}`;
-    frame.style.gridRow = source.toRow
-      ? `${source.row} / span ${Math.max(1, source.toRow - source.row + 1)}`
-      : `${source.row}`;
-    if (!source.fitCell && !source.toCol && source.widthPx) frame.style.width = `${source.widthPx}px`;
-    if (!source.fitCell && !source.toRow && source.heightPx) frame.style.height = `${source.heightPx}px`;
-    const image = document.createElement('img');
-    image.src = source.data;
-    image.alt = source.name;
-    image.draggable = false;
-    frame.appendChild(image);
-    grid.appendChild(frame);
+    grid.appendChild(renderImage(source));
   }
 
   for (const source of sheet.shapes) {
@@ -225,9 +263,48 @@ function renderSheet(sheet: ExcelSheet): HTMLElement {
   }
 
 
-  wrap.appendChild(grid);
-  section.appendChild(wrap);
-  return section;
+  const fontsChanged = () => onContentChange?.();
+  section.ownerDocument.fonts?.addEventListener('loadingdone', fontsChanged);
+  return {
+    element: section, viewport: wrap,
+    resize() {},
+    getContentWidth: () => grid.scrollWidth + 2,
+    dispose() {
+      section.ownerDocument.fonts?.removeEventListener('loadingdone', fontsChanged);
+      section.remove();
+    },
+  };
+}
+
+function renderCell(cell: ExcelCell | undefined, row: number, col: number): HTMLElement {
+  const el = document.createElement('div');
+  el.className = 'cell';
+  el.dataset.row = String(row);
+  el.dataset.col = String(col);
+  if (cell?.richText?.length) renderRichText(el, cell.richText);
+  else el.textContent = cell ? formatValue(cell.value, cell.numfmt) : '';
+  if (cell) {
+    applyCellStyle(el, cell);
+    if (cell.wrapText) el.style.whiteSpace = 'normal';
+  }
+  return el;
+}
+
+function renderImage(source: ExcelImage): HTMLElement {
+  const frame = document.createElement('div');
+  frame.className = source.fitCell ? 'sheet-image sheet-image-cell' : 'sheet-image';
+  frame.style.gridColumn = source.toCol
+    ? `${source.col} / span ${Math.max(1, source.toCol - source.col + 1)}` : `${source.col}`;
+  frame.style.gridRow = source.toRow
+    ? `${source.row} / span ${Math.max(1, source.toRow - source.row + 1)}` : `${source.row}`;
+  if (!source.fitCell && !source.toCol && source.widthPx) frame.style.width = `${source.widthPx}px`;
+  if (!source.fitCell && !source.toRow && source.heightPx) frame.style.height = `${source.heightPx}px`;
+  const image = document.createElement('img');
+  image.src = source.data;
+  image.alt = source.name;
+  image.draggable = false;
+  frame.appendChild(image);
+  return frame;
 }
 
 function renderShape(source: ExcelShape): HTMLElement {

@@ -14,7 +14,8 @@ const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 const { build } = await import(pathToFileURL(resolve(root, 'packages/viewer/node_modules/vite/dist/node/index.js')).href);
 const harness = await realpath(await mkdtemp(resolve(tmpdir(), 'office-sdk-visual-')));
 const baselineRevision = execFileSync('git', ['rev-parse', process.env.SDK_BASELINE_REF || 'ee6dbbe'], { cwd: root, encoding: 'utf8' }).trim();
-const samples = [
+const wordZoomOnly = process.argv.includes('--word-zoom-only');
+const samples = wordZoomOnly ? [] : [
   ['word', 'rich.docx'], ['word', 'styles-word.docx'],
   ['excel', 'rich.xlsx'], ['excel', 'styles-excel.xlsx'],
   ['ppt', 'arch.pptx'], ['ppt', 'styles-ppt.pptx'],
@@ -59,7 +60,57 @@ window.regression = {
     return {stats:parsed.stats,warnings:parsed.warnings};
   },
   show(side) { baseline.style.visibility=side==='baseline'?'visible':'hidden'; sdk.style.visibility=side==='sdk'?'visible':'hidden'; },
-  sheet(index) { for(const host of [baseline,sdk]) host.shadowRoot.querySelectorAll('.sheet-tab')[index].click(); },
+  async sheet(index) {
+    for(const host of [baseline,sdk]) host.shadowRoot.querySelectorAll('.sheet-tab')[index].click();
+    await document.fonts.ready;
+    await Promise.all([baseline,sdk].flatMap(host=>Array.from(host.shadowRoot.querySelectorAll('img')).map(image=>image.decode().catch(()=>{}))));
+    await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
+  },
+  async wordZoom({count,scale=1,afterFirstScale,landscape=false,baselineVariant=false}) {
+    oldRender?.dispose(); newRender?.dispose(); adapter?.destroy();
+    oldRender=newRender=adapter=undefined;
+    sdk.style.zoom=String(scale); sdk.style.width='1100px';
+    await document.fonts.ready;
+    const setup=widthPt=>({page:{widthPt,heightPt:300,leftPt:20,rightPt:20,topPt:20,bottomPt:20,landscape:widthPt>300},
+      header:[],firstHeader:[],evenHeader:[],footer:[],firstFooter:[],evenFooter:[],titlePage:false,pageNumbers:false});
+    const paragraphs=Array.from({length:count},(_,index)=>({kind:'paragraph',spacingAfterPt:20,content:[{kind:'text',text:'Paragraph '+(index+1)}]}));
+    const doc={setup:setup(landscape?600:300),blocks:landscape
+      ? [...paragraphs,{kind:'sectionBreak',section:setup(300)},{kind:'paragraph',content:[{kind:'text',text:'Landscape section'}]}]
+      : paragraphs,stats:{paragraphs:count+(landscape?1:0),tables:0,images:0,runs:count}};
+    // Hold idle work so the regression can change zoom between the first 120
+    // blocks and the next batch, without depending on machine scheduling.
+    const savedIdle=window.requestIdleCallback,savedCancel=window.cancelIdleCallback;
+    const pending=new Map();let nextIdle=0;
+    window.requestIdleCallback=callback=>{pending.set(++nextIdle,callback);return nextIdle;};
+    window.cancelIdleCallback=id=>pending.delete(id);
+    const snapshot=()=>({
+      pages:Array.from(sdk.shadowRoot.querySelectorAll('.page-body'),body=>Array.from(body.querySelectorAll('p'),node=>node.textContent)),
+      contentWidth:newRender.getContentWidth?.(),
+      widestPage:Math.max(0,...Array.from(sdk.shadowRoot.querySelectorAll('.page'),page=>page.getBoundingClientRect().width)),
+    });
+    try {
+      adapter=createWordAdapter();
+      newRender=baselineVariant?renderWordInto(sdk,doc):adapter.render(sdk,doc);
+      const initial=snapshot();
+      const firstPage=sdk.shadowRoot.querySelector('.page');
+      if(afterFirstScale!==undefined) {
+        const nextScale=afterFirstScale==='fit-width'?1100/initial.contentWidth:afterFirstScale;
+        sdk.style.zoom=String(nextScale);
+        if(afterFirstScale==='fit-width')sdk.style.width=initial.contentWidth+'px';
+        newRender.resize?.();
+      }
+      let batches=0;
+      while(pending.size) {
+        if(++batches>100)throw new Error('Word idle rendering did not complete');
+        const [id,callback]=pending.entries().next().value;pending.delete(id);callback();
+      }
+      return {initial,final:snapshot(),batches,firstPagePreserved:sdk.shadowRoot.querySelector('.page')===firstPage};
+    } finally {
+      newRender?.dispose();adapter?.destroy();newRender=adapter=undefined;
+      window.requestIdleCallback=savedIdle;window.cancelIdleCallback=savedCancel;
+      sdk.style.zoom='1';sdk.style.width='1100px';
+    }
+  },
   close() {oldRender?.dispose(); newRender?.dispose(); adapter?.destroy();}
 };
 `);
@@ -78,7 +129,7 @@ const server = createServer(async (req, res) => {
 await new Promise(done => server.listen(0, '127.0.0.1', done));
 const browser = await chromium.launch({channel:'chrome',headless:true});
 const page = await browser.newPage({viewport:{width:1200,height:1000},deviceScaleFactor:1});
-const browserErrors = [], failedRequests = [], results = [];
+const browserErrors = [], failedRequests = [], results = [], wordZoom = [];
 page.on('pageerror', error => browserErrors.push(error.message));
 page.on('requestfailed', request => failedRequests.push({url:request.url(),error:request.failure()?.errorText}));
 const hash = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -96,17 +147,19 @@ try {
     }, undefined, {timeout:20000,polling:100});
     const selector = kind==='word'?'.page':kind==='excel'?'.sheet':'.slide';
     const oldUnits = page.locator('#baseline').locator(selector), newUnits = page.locator('#sdk').locator(selector);
-    const count = await oldUnits.count();
+    const count = kind==='excel' ? await page.locator('#baseline .sheet-tab').count() : await oldUnits.count();
     assert.ok(count>0, name+' has no rendered pages/sheets');
-    assert.equal(await newUnits.count(),count,name+' page/sheet count changed');
+    if(kind==='excel') {
+      assert.deepEqual(await page.locator('#sdk .sheet-tab').allTextContents(),await page.locator('#baseline .sheet-tab').allTextContents(),name+' worksheet names changed');
+    } else assert.equal(await newUnits.count(),count,name+' page count changed');
     const comparisons = [];
     for (let index=0;index<count;index++) {
       if(kind==='excel') await page.evaluate(index=>window.regression.sheet(index),index);
       const prefix = name.replace(/\.[^.]+$/,'')+'-'+String(index+1).padStart(3,'0');
       await page.evaluate(()=>window.regression.show('baseline'));
-      const before = await oldUnits.nth(index).screenshot({path:resolve(output,prefix+'-baseline.png'),animations:'disabled',caret:'hide',scale:'css'});
+      const before = await (kind==='excel' ? oldUnits.filter({visible:true}) : oldUnits.nth(index)).screenshot({path:resolve(output,prefix+'-baseline.png'),animations:'disabled',caret:'hide',scale:'css'});
       await page.evaluate(()=>window.regression.show('sdk'));
-      const after = await newUnits.nth(index).screenshot({path:resolve(output,prefix+'-sdk.png'),animations:'disabled',caret:'hide',scale:'css'});
+      const after = await (kind==='excel' ? newUnits.filter({visible:true}) : newUnits.nth(index)).screenshot({path:resolve(output,prefix+'-sdk.png'),animations:'disabled',caret:'hide',scale:'css'});
       const byteExact = before.equals(after);
       const pixels = byteExact ? {changedPixels:0} : await page.evaluate(async ({before,after}) => {
         const decode = data => new Promise((resolve,reject) => {const image=new Image();image.onload=()=>resolve(image);image.onerror=reject;image.src='data:image/png;base64,'+data;});
@@ -125,9 +178,32 @@ try {
     results.push({kind,name,...result,pages:count,exact:comparisons.every(item=>item.exact),comparisons});
     console.log(JSON.stringify({name,pages:count,exact:results.at(-1).exact}));
   }
+  for (const count of [60, 180]) {
+    const reference = await page.evaluate(options=>window.regression.wordZoom(options), {count,baselineVariant:true});
+    assert.equal(reference.final.pages.length,count/6,'Word unscaled reference page count');
+    for (const options of [{scale:1},{scale:0.1},{scale:4},...(count>120?[{afterFirstScale:0.1},{afterFirstScale:4}]:[])]) {
+      const result = await page.evaluate(options=>window.regression.wordZoom(options), {count,...options});
+      assert.deepEqual(result.final.pages,reference.final.pages,`Word pagination changed at ${JSON.stringify(options)}, ${count} paragraphs`);
+      assert.ok(result.firstPagePreserved,'Word zoom replaced existing page elements');
+      if(count>120) {
+        const initialCount=result.initial.pages.flat().length;
+        assert.ok(initialCount>0&&initialCount<count,'Word fixture must exercise a pending idle batch');
+        assert.ok(result.batches>0,'Word fixture did not execute an idle batch');
+      }
+      wordZoom.push({count,...options,pages:result.final.pages.length,batches:result.batches});
+    }
+  }
+  const landscape = await page.evaluate(()=>window.regression.wordZoom({count:180,landscape:true,afterFirstScale:'fit-width'}));
+  assert.equal(landscape.initial.contentWidth,840,'Fit width must include the later landscape section before it is mounted');
+  assert.equal(landscape.final.contentWidth,840,'Intrinsic Word width must remain independent of zoom');
+  assert.ok(landscape.initial.widestPage<800,'Landscape fixture must defer its wide page to an idle batch');
+  assert.ok(landscape.final.widestPage<=1100,'Fit width overflowed when the landscape section appeared');
+  assert.equal(landscape.final.pages.flat().length,181,'Landscape section lost content during progressive rendering');
+  wordZoom.push({landscape:true,contentWidth:landscape.final.contentWidth,pages:landscape.final.pages.length,batches:landscape.batches});
+  console.log(JSON.stringify({test:'word-zoom-pagination',cases:wordZoom.length,passed:true}));
   await page.evaluate(()=>window.regression.close());
 } finally {
-  await writeFile(resolve(output,'results.json'),JSON.stringify({baselineRevision,consumer,harness,width:1100,deviceScaleFactor:1,comparison:'Chrome PNG and decoded RGBA comparison; same parsed model and host width; no tolerance',results,browserErrors,failedRequests},null,2));
+  await writeFile(resolve(output,wordZoomOnly?'word-zoom-results.json':'results.json'),JSON.stringify({baselineRevision,consumer,harness,width:1100,deviceScaleFactor:1,comparison:'Chrome PNG and decoded RGBA comparison; same parsed model and host width; no tolerance',results,wordZoom,browserErrors,failedRequests},null,2));
   await browser.close();
   await new Promise(done=>server.close(done));
 }
@@ -135,4 +211,4 @@ assert.deepEqual(browserErrors,[],'Browser errors');
 assert.deepEqual(failedRequests,[],'Failed requests');
 assert.equal(results.length,samples.length,'Incomplete visual regression');
 assert.ok(results.every(result=>result.exact),'Visual differences found: inspect output/playwright/visual-regression/results.json');
-console.log(`PASS: ${results.reduce((sum,result)=>sum+result.pages,0)} pages/sheets across ${results.length} samples match the pre-SDK renderer exactly.`);
+console.log(`PASS: ${results.reduce((sum,result)=>sum+result.pages,0)} pages/sheets across ${results.length} samples match the pre-SDK renderer exactly; ${wordZoom.length} Word zoom regressions passed.`);

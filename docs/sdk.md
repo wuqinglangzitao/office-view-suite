@@ -54,7 +54,9 @@ React/Vue 等框架在挂载后创建实例，在卸载时调用 `destroy()` 即
 
 ### 输入和结果
 
-`open({ bytes, name?, format?, signal? })` 支持 `.doc/.docx/.docm`、`.xlsx/.xlsm`、`.pptx`、`.pdf`。`format` 优先于文件名；没有可识别文件名时，尝试识别 PDF 文件头、Office ZIP 目录或 Word 复合文档签名。无法识别时返回 `UNSUPPORTED_FORMAT`，可显式指定 `format`。不支持 `.xls/.ppt`。
+`open({ bytes, name?, format?, signal? })` 支持 `.doc/.docx/.docm`、`.xlsx/.xlsm`、`.pptx`、`.pdf`。先检查文件内容，再选择解析器；例如 XLSX 误命名为 `.pdf` 仍按 Excel 打开。显式 `format` 与识别到的格式家族冲突时返回 `INVALID_SOURCE`。同一 OOXML 家族的 `.docx/.docm`、`.xlsx/.xlsm` 可由显式格式或文件名细化标记，因为宏格式不一定包含 VBA 条目。
+
+预检只检查 PDF 标识、Office ZIP/ZIP64 目录边界与主条目、Word 复合文档标识，不解压或验证完整文档语义。明确损坏的容器或与声明格式不符的内容返回 `INVALID_SOURCE`，未识别且没有受支持格式提示的内容返回 `UNSUPPORTED_FORMAT`；深层损坏仍由解析器返回 `PARSE_FAILED`。不支持 `.xls/.ppt`，指定 `format` 不能绕过预检。
 
 SDK 复制文件数据，传给 Worker 后不会分离调用方的 ArrayBuffer。结果包含 `format`、`durationMs`、`warnings: Array<{code,message}>` 和格式相关的 `stats`；PPT/PDF 提供 `pageCount`，Excel 提供 `itemCount`。Word 分页渐进完成，当前不提供最终页数。`open()` 表示文档已解析并挂载；Word 后续分页和 PDF 可视页渲染仍可能继续。
 
@@ -69,17 +71,34 @@ try { await opening; } catch (error) { /* error.code === 'ABORTED' */ }
 
 ### 事件与错误
 
-`on(listener)` 返回取消订阅函数，事件包括 `statechange`、`warning`、`error`。状态依次可能为 `idle/loading/ready/error/destroyed`。后台 PDF 页面错误通过 `error` 事件报告；接入方应同时处理 `open()` 的 Promise 拒绝和此事件。
+`on(listener)` 返回取消订阅函数，事件包括 `statechange`、`warning`、`error`。状态依次可能为 `idle/loading/ready/error/destroyed`。后台 PDF 页面和 Excel 切表、滚动渲染错误通过 `error` 事件报告；接入方应同时处理 `open()` 的 Promise 拒绝和此事件。
 
 | code | 含义 |
 | --- | --- |
-| `INVALID_SOURCE` | 数据类型不支持、空文件或读取失败 |
+| `INVALID_SOURCE` | 数据类型不支持、空文件、读取失败、明确损坏的容器或格式冲突 |
 | `UNSUPPORTED_FORMAT` | 格式不支持或无法识别 |
 | `ASSET_LOAD_FAILED` | Worker、WASM、PDFium 或适配器加载失败 |
 | `PARSE_FAILED` | 文档解析失败 |
 | `RENDER_FAILED` | DOM/Canvas 渲染失败 |
 | `ABORTED` | 请求取消、被替换或预览被清空 |
 | `DESTROYED` | 实例已经销毁 |
+
+### 只读预览控制
+
+```ts
+viewer.setZoom(1.5);             // 150%，支持 0.1–4 的有限数值
+viewer.setZoom('fit-width');     // 适应容器宽度，随 resize 调整
+console.log(viewer.getZoom());   // { mode: 'fixed' | 'fit-width', scale: number }
+console.log(viewer.getCapabilities()); // { zoom: true, fitWidth: true }
+```
+
+默认比例为 1。缩放仅作用于 SDK 自己创建的内容，不修改宿主容器样式；非法比例返回 `INVALID_SOURCE`，销毁后设置比例返回 `DESTROYED`。这些接口只控制预览，不提供搜索、单元格/范围定位、选区编辑、打印或导出。
+
+`fit-width` 同样受 0.1–4 的比例范围约束；超宽内容缩到 10% 后仍可能需要横向滚动。SDK 内容区负责缩放后的横向溢出，宿主页面负责外层纵向滚动；Excel 表格保留自己的滚动区域。PDF 当前通过 CSS 放大已有 Canvas，较大比例可能降低文字清晰度。
+
+Excel 只挂载当前工作表，往返切换保留各表滚动位置。大表使用可见区域渲染；当前视口以外的内容仍可通过滚动查看，但不常驻 DOM，因此宿主不应通过遍历 DOM 提取整份文件数据。
+
+超过 10,000 个潜在单元格的工作表使用虚拟视口。隐式行高和列宽由文本测量估算；字体加载完成后重新测量。极小行高、列宽或过多绘图会使单个视口过密，超过 20,000 个单元格及绘图节点时返回 `RENDER_FAILED`，避免无界挂载。这是异常密度保护；基准中 6,000 个单元格的门槛只对应固定测试环境和样例。
 
 ## Worker 和 WASM 部署
 
@@ -96,6 +115,8 @@ try { await opening; } catch (error) { /* error.code === 'ABORTED' */ }
   pdf/pdfium/pdfium.std.js, pdfium.std.wasm
   pdf/glue/pdfium_view_rs.js, pdfium_view_rs_bg.wasm
 ```
+
+每个适配器构建还会生成 `dist/asset-manifest.json`，包含相对于 dist 的资源路径、大小、SHA-256 和建议 MIME。`pnpm test:packages` 校验实际安装包中的清单并按清单复制部署资源；清单不会改变浏览器默认资源加载。文件缺失、额外未登记文件或哈希不符都会使校验失败。HTTP MIME/CORS 仍由宿主服务器配置，并由浏览器正负场景测试检查。
 
 ```ts
 const viewer = createOfficeViewer(container, {
@@ -156,7 +177,9 @@ workerBlobs.forEach(url => URL.revokeObjectURL(url));
 
 浏览器回归复用已安装的 Playwright，不增加 SDK 运行时依赖：先运行 `pnpm test:packages`，再运行 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:browser`。截图和结果位于 `output/playwright/`。本次只准备本地安装包，未发布 npm。
 
-`pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，覆盖 6 个样本共 45 页／工作表，包括架构评审 PPT 的全部 39 页。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。
+`pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，覆盖 6 个样本共 45 页／工作表，包括架构评审 PPT 的全部 39 页；另执行 9 组 Word 缩放与渐进分页检查。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。
+
+`PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:excel` 验证 Excel 懒挂载、滚动恢复、大表 DOM 上限、合并/冻结与缩放坐标。9 个合成 DTO 衡量渲染成本；3 个已签入 XLSX 和 1 个完整 OOXML 生成文件独立验证样式、合并、图片、富文本及公式缓存字段，加载/解析耗时另列。它从 `EXCEL_BASELINE_REF`（默认 `0ac7d51`）提取优化前 renderer，固定视口预热一次、测量五次，输出 `output/excel-preview-results.json`；为避免原版生成过量 DOM，超过安全阈值的旧版场景明确记为跳过，不声称对应旧版耗时。
 
 ## 第三方许可随包部署
 

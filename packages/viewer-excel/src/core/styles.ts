@@ -9,7 +9,7 @@ export const SHADOW_CSS = `
 .sheet[hidden] { display: none; }
 .sheet h2 { font-size: 15px; margin: 0 0 10px; color: #1f2328; }
 
-.grid-wrap { overflow: auto; max-height: 75vh; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; }
+.grid-wrap { overflow: auto; max-height: 75vh; max-width: var(--office-viewer-viewport-width, none); box-sizing: border-box; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; }
 .grid { display: grid; gap: 0; width: max-content;
   border-left: 1px solid #e4e8ec; border-top: 1px solid #e4e8ec; }
 
@@ -26,6 +26,12 @@ export const SHADOW_CSS = `
 }
 .frozen-row, .frozen-column { position: sticky; z-index: 5; }
 .frozen-corner { z-index: 6; }
+.virtual-grid { display: block; position: relative; overflow: clip; }
+.virtual-window { position: absolute; overflow: hidden; }
+.virtual-pane { position: absolute; overflow: hidden; background: #fff; }
+.virtual-pane > .cell, .virtual-pane > .sheet-image, .virtual-pane > .sheet-shape {
+  position: absolute; box-sizing: border-box;
+}
 .sheet-image { position: relative; z-index: 8; align-self: start; justify-self: start; pointer-events: none; overflow: hidden; }
 .sheet-image img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .sheet-image-cell { width: 100%; height: 100%; align-self: stretch; justify-self: stretch; padding: 2px; box-sizing: border-box; background: #fff; }

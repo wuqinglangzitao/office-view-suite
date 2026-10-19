@@ -1,6 +1,7 @@
 import {
   copyOfficeBytes,
   createOfficeViewerError,
+  resolveOfficeFormat,
   type OfficeAssetOptions,
   type OfficeOpenRequest,
   type OfficeOpenResult,
@@ -183,6 +184,8 @@ export function createPdfAdapter(options: OfficeViewerOptions = {}): PdfAdapter 
       try {
         const bytes = await Promise.race([copyOfficeBytes(request.bytes), cancelled]);
         assertCurrent(session);
+        const format = resolveOfficeFormat(bytes, { name: request.name, format: request.format ?? options.format });
+        if (format !== 'pdf') throw createOfficeViewerError('UNSUPPORTED_FORMAT', 'PDF adapter 仅支持 PDF 文件');
         const response = await send(session, 'open', { bytes }, [bytes]);
         assertCurrent(session);
         if (response.type !== 'meta' || !Array.isArray(response.pages) || response.pages.some(page =>

@@ -1,8 +1,8 @@
 import {
   copyOfficeBytes,
   createOfficeViewerError,
-  detectOfficeFormat,
   inferOfficeFormat,
+  resolveOfficeFormat,
   type OfficeFormat,
   type OfficeOpenRequest,
   type OfficeOpenResult,
@@ -12,16 +12,27 @@ import {
   type OfficeViewerListener,
   type OfficeViewerOptions,
   type OfficeViewerState,
+  type OfficeZoom,
 } from '@office-view-suite/viewer-core';
 
-type Rendered = { stats: Record<string, number>; dispose(): void; resize?(): void };
+type Rendered = { stats: Record<string, number>; dispose(): void; resize?(): void; getContentWidth?(): number };
 type RuntimeAdapter = {
   open(request: OfficeOpenRequest): Promise<OfficeOpenResult & { document: unknown }>;
-  render(host: HTMLElement, document: unknown, onError?: (error: OfficeViewerError) => void): Rendered;
+  render(host: HTMLElement, document: unknown, onError?: (error: OfficeViewerError) => void, onContentChange?: () => void): Rendered;
   clear?(): void;
   destroy(): void;
 };
 type AdapterKind = 'word' | 'excel' | 'ppt' | 'pdf';
+
+const adapterKinds: Record<OfficeFormat, AdapterKind> = {
+  doc: 'word', docx: 'word', docm: 'word', xlsx: 'excel', xlsm: 'excel', pptx: 'ppt', pdf: 'pdf',
+};
+const adapterLoaders = {
+  word: async () => (await import('@office-view-suite/viewer-word')).createWordAdapter,
+  excel: async () => (await import('@office-view-suite/viewer-excel')).createExcelAdapter,
+  ppt: async () => (await import('@office-view-suite/viewer-ppt')).createPptAdapter,
+  pdf: async () => (await import('@office-view-suite/viewer-pdf')).createPdfAdapter,
+};
 
 function asViewerError(error: unknown, code: OfficeViewerError['code']): OfficeViewerError {
   return error instanceof Error && 'code' in error
@@ -47,13 +58,19 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 
 export function createOfficeViewer(container: HTMLElement, options: OfficeViewerOptions = {}): OfficeViewer {
   // The caller owns its container, existing children, style, and possible shadow root.
+  const viewport = container.ownerDocument.createElement('div');
+  viewport.className = 'office-viewer-host';
+  viewport.style.width = '100%';
+  viewport.style.minWidth = '0';
+  viewport.style.overflow = 'auto';
   const host = container.ownerDocument.createElement('div');
-  host.className = 'office-viewer-host';
+  host.className = 'office-viewer-surface';
   host.style.display = 'block';
   host.style.width = '100%';
   host.style.minWidth = '0';
   host.attachShadow({ mode: 'open' });
-  container.appendChild(host);
+  viewport.appendChild(host);
+  container.appendChild(viewport);
 
   const listeners = new Set<OfficeViewerListener>();
   const adapters = new Map<AdapterKind, Promise<RuntimeAdapter>>();
@@ -67,6 +84,32 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
   let activeSession: AbortController | undefined;
   let lastWidth = container.getBoundingClientRect().width;
   let resizeFrame: number | undefined;
+  let zoom: OfficeZoom = 1;
+  let scale = 1;
+  let customZoom = false;
+
+  const applyZoom = (): void => {
+    if (!customZoom) return;
+    if (typeof zoom === 'number') scale = zoom;
+    const width = viewport.clientWidth || container.getBoundingClientRect().width;
+    if (width <= 0) return;
+    let contentWidth = currentRendered?.getContentWidth?.() ?? host.scrollWidth ?? width;
+    // Page-based renderers may center a fixed-width page outside the surface.
+    // Its width is not fully represented by scrollWidth when it overflows left.
+    if (!currentRendered?.getContentWidth) {
+      let pageWidth = 0;
+      for (const page of host.shadowRoot?.querySelectorAll<HTMLElement>('.page, .slide') ?? []) {
+        const padding = page.parentElement ? getComputedStyle(page.parentElement) : undefined;
+        pageWidth = Math.max(pageWidth, page.getBoundingClientRect().width / scale
+          + (Number.parseFloat(padding?.paddingLeft ?? '') || 0) + (Number.parseFloat(padding?.paddingRight ?? '') || 0));
+      }
+      if (pageWidth > 0) contentWidth = pageWidth;
+    }
+    scale = zoom === 'fit-width' ? Math.min(4, Math.max(0.1, width / Math.max(1, contentWidth))) : zoom;
+    host.style.zoom = String(scale);
+    host.style.width = `${zoom === 'fit-width' ? width / scale : width}px`;
+    host.style.setProperty('--office-viewer-viewport-width', `${width / scale}px`);
+  };
 
   const emit = (event: OfficeViewerEvent): void => {
     if (event.type === 'statechange') state = event.state;
@@ -89,29 +132,13 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
   };
 
   async function loadAdapter(kind: AdapterKind): Promise<RuntimeAdapter> {
-    if (kind === 'pdf') {
-      const module = await import('@office-view-suite/viewer-pdf');
-      if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
-      return module.createPdfAdapter(options);
-    }
-    if (kind === 'ppt') {
-      const module = await import('@office-view-suite/viewer-ppt');
-      if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
-      return module.createPptAdapter(options);
-    }
-    if (kind === 'excel') {
-      const module = await import('@office-view-suite/viewer-excel');
-      if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
-      return module.createExcelAdapter(options);
-    }
-    const module = await import('@office-view-suite/viewer-word');
+    const create = await adapterLoaders[kind]();
     if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
-    return module.createWordAdapter(options);
+    return create(options);
   }
 
   const getAdapter = (format: OfficeFormat): Promise<RuntimeAdapter> => {
-    const kind: AdapterKind = format === 'pdf' ? 'pdf' : format === 'pptx' ? 'ppt'
-      : format === 'xlsx' || format === 'xlsm' ? 'excel' : 'word';
+    const kind = adapterKinds[format];
     const cached = adapters.get(kind);
     if (cached) return cached;
     const loaded = loadAdapter(kind).catch(error => {
@@ -132,7 +159,11 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
         if (destroyed || generation !== renderGeneration) return;
         emit({ type: 'statechange', state: 'error' });
         emit({ type: 'error', error: asViewerError(error, 'RENDER_FAILED') });
+      }, () => {
+        if (generation === renderGeneration) resizeCurrent();
       });
+      applyZoom();
+      if (customZoom) currentRendered.resize?.();
       lastWidth = container.getBoundingClientRect().width;
     } catch (error) {
       throw asViewerError(error, 'RENDER_FAILED');
@@ -142,6 +173,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
   const resizeCurrent = (): void => {
     if (destroyed || state !== 'ready') return;
     try {
+      applyZoom();
       if (currentRendered?.resize) currentRendered.resize();
       else renderCurrent();
       lastWidth = container.getBoundingClientRect().width;
@@ -187,8 +219,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
           throw createOfficeViewerError('UNSUPPORTED_FORMAT', '不支持此文件格式');
         }
         const bytes = await untilAborted(copyOfficeBytes(request.bytes), session.signal);
-        const format = inferOfficeFormat(request.name, explicit) ?? detectOfficeFormat(bytes);
-        if (!format) throw createOfficeViewerError('UNSUPPORTED_FORMAT', '无法从文件名或文件内容识别格式，请指定 format');
+        const format = resolveOfficeFormat(bytes, { name: request.name, format: explicit });
         const adapter = await untilAborted(getAdapter(format), session.signal);
         if (session.signal.aborted) throw abortError(session.signal);
         const result = await untilAborted(adapter.open({ ...request, bytes, format, signal: session.signal }), session.signal);
@@ -233,6 +264,18 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       emit({ type: 'statechange', state: 'idle' });
     },
     resize: resizeCurrent,
+    setZoom(value): void {
+      if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
+      if (value !== 'fit-width' && (typeof value !== 'number' || !Number.isFinite(value) || value < 0.1 || value > 4)) {
+        throw createOfficeViewerError('INVALID_SOURCE', '缩放比例必须在 0.1 到 4 之间，或为 fit-width');
+      }
+      zoom = value;
+      customZoom = true;
+      if (state === 'ready') resizeCurrent();
+      else applyZoom();
+    },
+    getZoom() { return { mode: zoom === 'fit-width' ? 'fit-width' : 'fixed', scale }; },
+    getCapabilities() { return { zoom: !destroyed, fitWidth: !destroyed }; },
     destroy(): void {
       if (destroyed) return;
       destroyed = true;
@@ -243,7 +286,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
       for (const adapter of adapters.values()) void adapter.then(value => value.destroy(), () => {});
       adapters.clear();
-      host.remove();
+      viewport.remove();
       emit({ type: 'statechange', state: 'destroyed' });
       listeners.clear();
     },
@@ -268,4 +311,7 @@ export type {
   OfficeViewerState,
   OfficeWarning,
   OfficeWorkerFactory,
+  OfficeZoom,
+  OfficeZoomState,
+  OfficeViewerCapabilities,
 } from '@office-view-suite/viewer-core';

@@ -1,4 +1,4 @@
-import { createWorkerAdapter, type OfficeOpenRequest, type OfficeOpenResult, type OfficeViewerOptions } from '@office-view-suite/viewer-core';
+import { createOfficeViewerError, createWorkerAdapter, type OfficeOpenRequest, type OfficeOpenResult, type OfficeViewerError, type OfficeViewerOptions } from '@office-view-suite/viewer-core';
 import { renderExcelInto } from './core/render';
 import type { ExcelDoc } from './core/types';
 
@@ -33,8 +33,10 @@ export function createExcelAdapter(options: OfficeViewerOptions = {}) {
         document: result.document,
       };
     },
-    render(host: HTMLElement, document: ExcelDoc) {
-      const rendered = renderExcelInto(host, document);
+    render(host: HTMLElement, document: ExcelDoc, onError?: (error: OfficeViewerError) => void, onContentChange?: () => void) {
+      const rendered = renderExcelInto(host, document, onError ? error => {
+        onError(createOfficeViewerError('RENDER_FAILED', error.message));
+      } : undefined, onContentChange);
       return { ...rendered, stats: { ...rendered.stats } };
     },
     destroy: workerAdapter.destroy,

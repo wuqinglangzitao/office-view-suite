@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import test from 'node:test';
+import { formatBytes } from './sdk-format-fixtures.mjs';
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const rejectedWith = code => error => error.code === code;
-const input = format => ({ format, bytes: new Uint8Array([1, 2, 3]) });
+const input = format => ({ format, bytes: formatBytes(format) });
 let releaseExcelImport;
 globalThis.__sdkMockImports = { excel: new Promise(resolve => { releaseExcelImport = resolve; }) };
 registerHooks({
@@ -20,11 +21,13 @@ const { createOfficeViewer } = await import('../packages/viewer/dist/index.js');
 
 class Element {
   children = [];
-  style = {};
+  style = { setProperty(name, value) { this[name] = value; } };
+  scrollWidth = 640;
+  get clientWidth() { return this.parent?.clientWidth ?? this.width; }
   width = 640;
   ownerDocument = { createElement: () => new Element() };
   appendChild(child) { this.children.push(child); child.parent = this; return child; }
-  attachShadow() { this.shadowRoot = { children: [], replaceChildren(...children) { this.children = children; } }; return this.shadowRoot; }
+  attachShadow() { this.shadowRoot = { children: [], querySelectorAll() { return []; }, replaceChildren(...children) { this.children = children; } }; return this.shadowRoot; }
   getBoundingClientRect() { return { width: this.width }; }
   remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
 }
@@ -42,23 +45,26 @@ globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callbac
 globalThis.cancelAnimationFrame = id => frames.delete(id);
 function flushFrames() { for (const [id, callback] of frames) { frames.delete(id); callback(); } }
 
-function runtime({ open, resize = true } = {}) {
-  const calls = { created: 0, destroyed: 0, rendered: 0, disposed: 0, resized: 0, options: [], kinds: [] };
+function runtime({ open, resize = true, contentWidth } = {}) {
+  const calls = { created: 0, destroyed: 0, rendered: 0, disposed: 0, resized: 0, contentWidth, options: [], kinds: [] };
   globalThis.__sdkAdapterFactory = (kind, options) => {
     calls.created++;
     calls.kinds.push(kind);
     calls.options.push(options);
     return {
       open: open ?? (async request => ({ format: request.format, document: { label: 'document' }, stats: { sheets: 2 }, durationMs: 1, warnings: [{ code: 'FONT', message: 'fallback' }] })),
-      render(host, document, onError) {
+      render(host, document, onError, onContentChange) {
         calls.rendered++;
         calls.document = document;
+        calls.host = host;
         calls.onError = onError;
+        calls.onContentChange = onContentChange;
         host.shadowRoot.replaceChildren(document);
         return {
           stats: { pages: 3 },
           dispose() { calls.disposed++; host.shadowRoot.replaceChildren(); },
           ...(resize ? { resize() { calls.resized++; } } : {}),
+          ...(contentWidth ? { getContentWidth: () => calls.contentWidth } : {}),
         };
       },
       destroy() { calls.destroyed++; },
@@ -248,5 +254,98 @@ test('a host shown again at the same width resumes incremental rendering', async
   observer.notify(640);
   flushFrames();
   assert.equal(calls.resized, 1);
+  viewer.destroy();
+});
+
+test('content routing uses all four adapter factories and rejects conflicts before importing', async () => {
+  const calls = runtime();
+  const viewer = createOfficeViewer(new Element());
+  await assert.rejects(viewer.open({ bytes: formatBytes('xlsx'), format: 'pdf' }), rejectedWith('INVALID_SOURCE'));
+  assert.equal(calls.created, 0);
+  for (const [format, kind] of [['docx', 'word'], ['xlsx', 'excel'], ['pptx', 'ppt'], ['pdf', 'pdf']]) {
+    const result = await viewer.open({ bytes: formatBytes(format), name: 'wrong.doc' });
+    assert.equal(result.format, format);
+    assert.equal(calls.kinds.at(-1), kind);
+  }
+  assert.equal(calls.created, 4);
+  viewer.destroy();
+});
+
+test('zoom preserves rendered content and adapts its viewport without modifying the caller', async () => {
+  const calls = runtime({ contentWidth: 1000 });
+  const container = new Element();
+  container.style.color = 'red';
+  const viewer = createOfficeViewer(container);
+  assert.deepEqual(viewer.getCapabilities(), { zoom: true, fitWidth: true });
+  assert.deepEqual(viewer.getZoom(), { mode: 'fixed', scale: 1 });
+  viewer.setZoom(2);
+  await viewer.open(input('xlsx'));
+  assert.equal(calls.host.style.zoom, '2');
+  assert.equal(calls.host.style['--office-viewer-viewport-width'], '320px');
+  viewer.setZoom('fit-width');
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.64 });
+  assert.equal(calls.host.style.width, '1000px');
+  container.width = 800;
+  observers.at(-1).notify(800);
+  flushFrames();
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.8 });
+  assert.equal(calls.rendered, 1);
+  assert.equal(calls.disposed, 0);
+  assert.equal(calls.resized, 3);
+  for (const invalid of [0, -1, 4.01, NaN, Infinity, '50%', null]) {
+    assert.throws(() => viewer.setZoom(invalid), rejectedWith('INVALID_SOURCE'));
+  }
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.8 });
+  viewer.clear();
+  await viewer.open(input('docx'));
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.8 });
+  assert.equal(container.style.zoom, undefined);
+  assert.equal(container.style.color, 'red');
+  viewer.destroy();
+  assert.deepEqual(viewer.getCapabilities(), { zoom: false, fitWidth: false });
+  assert.throws(() => viewer.setZoom(1), rejectedWith('DESTROYED'));
+});
+
+test('fixed zoom remains observable while the viewer is hidden', () => {
+  runtime();
+  const container = new Element();
+  container.width = 0;
+  const viewer = createOfficeViewer(container);
+  viewer.setZoom(1.5);
+  assert.deepEqual(viewer.getZoom(), { mode: 'fixed', scale: 1.5 });
+  viewer.destroy();
+});
+
+test('fit width follows active worksheet changes and ignores stale render notifications', async () => {
+  const calls = runtime({ contentWidth: 1000 });
+  const viewer = createOfficeViewer(new Element());
+  await viewer.open(input('xlsx'));
+  viewer.setZoom('fit-width');
+  calls.contentWidth = 2000;
+  calls.onContentChange();
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.32 });
+  assert.equal(calls.rendered, 1);
+  const staleChange = calls.onContentChange;
+  await viewer.open(input('docx'));
+  const resizeCount = calls.resized;
+  staleChange();
+  assert.equal(calls.resized, resizeCount);
+  viewer.destroy();
+});
+
+test('page fit uses document geometry even when the host is wider than the page', async () => {
+  const calls = runtime();
+  const container = new Element();
+  const viewer = createOfficeViewer(container);
+  await viewer.open(input('docx'));
+  calls.host.shadowRoot.querySelectorAll = () => [{
+    getBoundingClientRect: () => ({ width: 400 * Number(calls.host.style.zoom || 1) }),
+  }];
+  viewer.setZoom('fit-width');
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 1.6 });
+  container.width = 800;
+  viewer.resize();
+  assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 2 });
+  assert.equal(calls.rendered, 1);
   viewer.destroy();
 });

@@ -10,11 +10,15 @@ const mime = { '.html': 'text/html', '.js': 'text/javascript', '.wasm': 'applica
 const server = createServer(async (req, res) => {
   const path = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
   if (!path.startsWith('/office-view/')) { res.writeHead(404).end(); return; }
-  const file = resolve(root, path.slice('/office-view/'.length) || 'index.html');
+  const relative = path.slice('/office-view/'.length);
+  const fault = relative.match(/^(fault-mime|fault-cors)\//)?.[1];
+  const file = resolve(root, (fault ? relative.slice(fault.length + 1) : relative) || 'index.html');
   if (file !== root && !file.startsWith(root + sep)) { res.writeHead(403).end(); return; }
   try {
     const body = await readFile(file);
-    res.writeHead(200, { 'Content-Type': mime[extname(file)] || 'application/octet-stream', 'Access-Control-Allow-Origin': '*' });
+    const headers = { 'Content-Type': fault === 'fault-mime' && extname(file) === '.js' ? 'text/plain' : mime[extname(file)] || 'application/octet-stream' };
+    if (fault !== 'fault-cors') headers['Access-Control-Allow-Origin'] = '*';
+    res.writeHead(200, headers);
     res.end(body);
   } catch { res.writeHead(404).end(); }
 });
@@ -43,12 +47,38 @@ try {
     }, kind);
     assert.ok(Object.keys(result.stats).length > 0);
     await page.waitForFunction(() => {
-      const host = document.querySelector('#viewer').firstElementChild;
+      const host = document.querySelector('#viewer .office-viewer-surface');
       return host?.shadowRoot?.textContent.length > 100;
     });
-    if (kind === 'pdf') await page.waitForFunction(() => document.querySelector('#viewer').firstElementChild?.shadowRoot?.querySelector('canvas')?.width > 300);
+    if (kind === 'pdf') await page.waitForFunction(() => document.querySelector('#viewer .office-viewer-surface')?.shadowRoot?.querySelector('canvas')?.width > 300);
     await page.screenshot({ path: new URL(`${kind}.png`, output).pathname });
     results.push({ test: `packed-vite-${kind}`, result });
+    const zoom = await page.evaluate(async kind => {
+      const viewer = window.officeFixture.viewer;
+      const surface = document.querySelector('#viewer .office-viewer-surface');
+      const selector = { word: '.page', excel: '.cell', ppt: '.slide', pdf: 'canvas' }[kind];
+      const contentWidth = () => surface.shadowRoot.querySelector(selector).getBoundingClientRect().width;
+      const originalWidth = contentWidth();
+      const capabilities = viewer.getCapabilities();
+      if (!capabilities.zoom || !capabilities.fitWidth) throw new Error('Missing preview capabilities');
+      viewer.setZoom(1.5);
+      viewer.resize();
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const fixed = viewer.getZoom();
+      if (fixed.mode !== 'fixed' || fixed.scale !== 1.5) throw new Error('Fixed zoom did not persist');
+      const scaledWidth = contentWidth();
+      if (Math.abs(scaledWidth / originalWidth - 1.5) > 0.05) throw new Error(`Zoom geometry mismatch: ${originalWidth} -> ${scaledWidth}`);
+      viewer.setZoom('fit-width');
+      await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      const fit = viewer.getZoom();
+      if (fit.mode !== 'fit-width' || !Number.isFinite(fit.scale) || fit.scale <= 0) throw new Error('Invalid fit width scale');
+      const fitted = surface.shadowRoot.querySelector(kind === 'excel' ? '.grid' : selector).getBoundingClientRect().width;
+      const available = surface.parentElement.clientWidth;
+      if (fit.scale > 0.1 && fitted > available + 2) throw new Error(`Fit width overflows: ${fitted} > ${available}`);
+      viewer.setZoom(1);
+      return { fixed, fit, originalWidth, scaledWidth, fitted, available };
+    }, kind);
+    results.push({ test: `preview-zoom-${kind}`, ...zoom });
   }
   results.push(await page.evaluate(async () => {
     const f = window.officeFixture;
@@ -61,7 +91,7 @@ try {
     const replacement = await f.viewer.open(ppt);
     if (await pending !== 'ABORTED' || replacement.format !== 'pptx') throw new Error('supersession failed');
     f.viewer.clear();
-    if (document.querySelector('#viewer').firstElementChild?.shadowRoot?.querySelector('.slide')) throw new Error('clear failed');
+    if (document.querySelector('#viewer .office-viewer-surface')?.shadowRoot?.querySelector('.slide')) throw new Error('clear failed');
     const liveAbort = new AbortController();
     const canceled = f.viewer.open({ ...word, signal: liveAbort.signal }).then(() => 'BAD', e => e.code);
     liveAbort.abort();
@@ -107,6 +137,39 @@ try {
   assert.deepEqual(failures, [], 'Failed asset requests');
   assert.ok(requests.some(url => new URL(url).pathname.endsWith('.wasm')), 'No WASM requests');
   assert.ok(new Set(requests.filter(url => url.startsWith(base) && /\/assets\/worker-.*\.js$/.test(new URL(url).pathname))).size >= 4, 'All four workers must stay separate assets');
+  // Expected deployment failures use separate pages so normal-load errors remain strict.
+  for (const fault of ['fault-mime', 'fault-cors']) {
+    const faultPage = await browser.newPage();
+    try {
+      await faultPage.goto(base);
+      await faultPage.waitForFunction(() => !!window.officeFixture);
+      const code = await faultPage.evaluate(async ({ fault, port }) => {
+        const host = document.createElement('div'); document.body.append(host);
+        const blobs = [];
+        const viewer = window.officeFixture.create(host, {
+          assets: { baseUrl: `http://localhost:${port}/office-view/${fault}/office-assets/` },
+          workerFactory(url, options) {
+            const blob = URL.createObjectURL(new Blob([`import ${JSON.stringify(url.href)}`], { type: 'text/javascript' }));
+            blobs.push(blob);
+            return new Worker(blob, options);
+          },
+        });
+        let timer;
+        try {
+          const source = await window.officeFixture.sample('excel');
+          return await Promise.race([
+            viewer.open(source).then(() => 'UNEXPECTED_SUCCESS', error => error.code),
+            new Promise(resolve => { timer = setTimeout(() => resolve('TIMEOUT'), 10000); }),
+          ]);
+        } finally {
+          clearTimeout(timer);
+          viewer.destroy(); host.remove(); blobs.forEach(url => URL.revokeObjectURL(url));
+        }
+      }, { fault, port });
+      assert.equal(code, 'ASSET_LOAD_FAILED', `${fault} must report an asset failure`);
+      results.push({ test: fault, code });
+    } finally { await faultPage.close(); }
+  }
   await writeFile(new URL('sdk-results.json', output), JSON.stringify({ results, errors, failures, assetRequests: requests.filter(url => /wasm|worker|pdfium/.test(url)) }, null, 2));
   console.log(JSON.stringify({ passed: results.length, results, errors, failures }, null, 2));
 } finally {

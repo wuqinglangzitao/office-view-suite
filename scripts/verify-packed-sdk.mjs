@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { verifyPdfiumNotices } from './verify-pdfium-notices.mjs';
+import { verifyAssetManifest } from './sdk-asset-manifest.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pdfiumSource = resolve(root, 'apps/pdf-view/public/pdfium');
@@ -52,7 +53,13 @@ for (const [format, sample] of Object.entries({word:'styles-word.docx',excel:'st
 }
 run('pnpm', ['install', '--offline', '--ignore-scripts']);
 for (const format of ['word', 'excel', 'ppt', 'pdf']) {
-  await cp(resolve(consumer, `node_modules/@office-view-suite/viewer-${format}/dist/assets/${format}`), resolve(consumer, `public/office-assets/${format}`), { recursive: true });
+  const dist = resolve(consumer, `node_modules/@office-view-suite/viewer-${format}/dist`);
+  const manifest = await verifyAssetManifest(dist, format);
+  for (const asset of manifest.assets) {
+    const deployed = resolve(consumer, 'public/office-assets', asset.path.slice('assets/'.length));
+    await mkdir(resolve(deployed, '..'), { recursive: true });
+    await cp(resolve(dist, asset.path), deployed);
+  }
 }
 run('node', [resolve(root, 'packages/viewer/node_modules/typescript/bin/tsc'), '--noEmit']);
 run('node', [resolve(root, 'packages/viewer/node_modules/vite/bin/vite.js'), 'build']);

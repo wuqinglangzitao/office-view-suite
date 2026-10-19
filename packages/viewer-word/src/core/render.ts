@@ -25,6 +25,7 @@ type PageState = { body: HTMLElement; setup: WordSectionSetup; sectionPage: numb
 export function renderWordInto(host: HTMLElement, doc: WordDoc): {
   stats: { blocks: number; paragraphs: number; tables: number; images: number };
   resize(): void;
+  getContentWidth(): number;
   dispose(): void;
 } {
   const shadow = host.shadowRoot ?? host.attachShadow({ mode: 'open' });
@@ -39,6 +40,7 @@ export function renderWordInto(host: HTMLElement, doc: WordDoc): {
   shadow.appendChild(container);
 
   const sections = splitSections(doc);
+  const pageWidth = sections.reduce((width, section) => Math.max(width, section.setup.page.widthPt * 4 / 3), 0);
   let sectionIndex = 0;
   let unitIndex = 0;
   let globalPage = 0;
@@ -98,13 +100,24 @@ export function renderWordInto(host: HTMLElement, doc: WordDoc): {
     return current;
   };
 
-  const layoutBottom = (node: HTMLElement): number => {
-    const marginBottom = Number.parseFloat(getComputedStyle(node).marginBottom) || 0;
-    return node.getBoundingClientRect().bottom + marginBottom;
+  const pageBounds = (page: PageState): { bottom: number; scale: number } => {
+    const rect = page.body.getBoundingClientRect();
+    const logicalHeight = Number.parseFloat(getComputedStyle(page.body).height);
+    // Rectangles include CSS zoom while computed margins do not. Measure the
+    // effective scale without offsetHeight's integer rounding at small zooms.
+    const scale = logicalHeight > 0 && rect.height > 0 ? rect.height / logicalHeight : 1;
+    return { bottom: rect.bottom + 0.5 * scale, scale };
   };
 
-  const fitsPage = (node: HTMLElement, page: PageState): boolean =>
-    layoutBottom(node) <= page.body.getBoundingClientRect().bottom + 0.5;
+  const layoutBottom = (node: HTMLElement, scale: number): number => {
+    const marginBottom = Number.parseFloat(getComputedStyle(node).marginBottom) || 0;
+    return node.getBoundingClientRect().bottom + marginBottom * scale;
+  };
+
+  const fitsPage = (node: HTMLElement, page: PageState): boolean => {
+    const bounds = pageBounds(page);
+    return layoutBottom(node, bounds.scale) <= bounds.bottom;
+  };
 
   const placeTableAcrossPages = (source: HTMLElement, setup: WordSectionSetup): void => {
     const sourceTable = source.querySelector<HTMLTableElement>(':scope > table');
@@ -172,8 +185,8 @@ export function renderWordInto(host: HTMLElement, doc: WordDoc): {
       const page = ensurePage(setup);
       const before = page.body.childElementCount;
       page.body.append(...remaining);
-      const bodyBottom = page.body.getBoundingClientRect().bottom + 0.5;
-      let overflowAt = remaining.findIndex(node => layoutBottom(node) > bodyBottom);
+      const bounds = pageBounds(page);
+      const overflowAt = remaining.findIndex(node => layoutBottom(node, bounds.scale) > bounds.bottom);
       if (overflowAt < 0) return;
       const overflow = remaining.slice(overflowAt);
       overflow.forEach(node => node.remove());
@@ -236,6 +249,11 @@ export function renderWordInto(host: HTMLElement, doc: WordDoc): {
     // Fixed page geometry needs no reflow; resume work deferred by a hidden host.
     resize() {
       if (!disposed && !cancelPending && sectionIndex < sections.length) pump(true);
+    },
+    getContentWidth() {
+      if (disposed) return 0;
+      const style = getComputedStyle(container);
+      return pageWidth + (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0);
     },
     dispose() {
       if (disposed) return;

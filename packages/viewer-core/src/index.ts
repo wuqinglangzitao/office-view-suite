@@ -69,10 +69,18 @@ export type OfficeViewerEvent =
 export type OfficeViewerListener = (event: OfficeViewerEvent) => void;
 export type OfficeViewerState = 'idle' | 'loading' | 'ready' | 'error' | 'destroyed';
 
+export type OfficeZoom = number | 'fit-width';
+export interface OfficeZoomState { mode: 'fixed' | 'fit-width'; scale: number }
+export interface OfficeViewerCapabilities { readonly zoom: boolean; readonly fitWidth: boolean }
+
 export interface OfficeViewer {
   open(request: OfficeOpenRequest): Promise<OfficeOpenResult>;
   clear(): void;
   resize(): void;
+  /** Fixed scale from 0.1 to 4, or fit the document width to its container. */
+  setZoom(zoom: OfficeZoom): void;
+  getZoom(): OfficeZoomState;
+  getCapabilities(): OfficeViewerCapabilities;
   destroy(): void;
   on(listener: OfficeViewerListener): () => void;
 }
@@ -136,12 +144,23 @@ export function inferOfficeFormat(name?: string, explicit?: OfficeFormat): Offic
   return extension && formats.includes(extension) ? extension as OfficeFormat : undefined;
 }
 
-/** Inspect ZIP directory names only; document entries are never decompressed here. */
-export function detectOfficeFormat(source: ArrayBuffer | Uint8Array): OfficeFormat | undefined {
+interface FormatInspection { format?: OfficeFormat; invalid?: string }
+
+/** Container inspection only: no decompression, CRC checks, or PDF object parsing. */
+function inspectOfficeFormat(source: ArrayBuffer | Uint8Array): FormatInspection {
   const bytes = source instanceof Uint8Array ? source : new Uint8Array(source);
-  const prefix = new TextDecoder().decode(bytes.subarray(0, 1024));
-  if (prefix.includes('%PDF-')) return 'pdf';
-  if (bytes.length < 22) return undefined;
+  const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
+  if (ole.every((value, index) => bytes[index] === value)) {
+    if (bytes.length < 512) return { invalid: 'OLE 文件头不完整' };
+    return new TextDecoder('utf-16le').decode(bytes).includes('WordDocument\0') ? { format: 'doc' } : {};
+  }
+  const zip = bytes[0] === 0x50 && bytes[1] === 0x4b;
+  const zipSignature = zip && ((bytes[2] === 3 && bytes[3] === 4)
+    || (bytes[2] === 1 && bytes[3] === 2) || (bytes[2] === 5 && bytes[3] === 6));
+  // Strong container signatures take precedence over PDF text embedded in a
+  // ZIP member name or an OLE stream. Keep PDF's tolerated leading prefix.
+  if (!zipSignature && new TextDecoder().decode(bytes.subarray(0, 1024)).includes('%PDF-')) return { format: 'pdf' };
+  if (bytes.length < 22) return zip ? { invalid: 'ZIP 文件尾不完整' } : {};
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let end = -1;
   for (let offset = bytes.length - 22; offset >= Math.max(0, bytes.length - 65557); offset--) {
@@ -150,28 +169,76 @@ export function detectOfficeFormat(source: ArrayBuffer | Uint8Array): OfficeForm
       break;
     }
   }
-  if (end < 0) {
-    // Legacy DOC is a compound file; require its WordDocument stream name as well.
-    const ole = [0xd0, 0xcf, 0x11, 0xe0, 0xa1, 0xb1, 0x1a, 0xe1];
-    if (ole.every((value, index) => bytes[index] === value)
-      && new TextDecoder('utf-16le').decode(bytes).includes('WordDocument\0')) return 'doc';
-    return undefined;
-  }
+  if (end < 0) return zip ? { invalid: 'ZIP 中央目录缺失或已截断' } : {};
+  const damaged = (): FormatInspection => ({ invalid: 'ZIP 中央目录边界无效' });
   let offset = view.getUint32(end + 16, true);
-  const count = view.getUint16(end + 10, true);
+  let count = view.getUint16(end + 10, true);
+  let size = view.getUint32(end + 12, true);
+  let directoryLimit = end;
+  if (offset === 0xffffffff || size === 0xffffffff || count === 0xffff) {
+    // ZIP64 uses a locator immediately before the ordinary end record.
+    const locator = end - 20;
+    if (locator < 0 || view.getUint32(locator, true) !== 0x07064b50) return damaged();
+    const safe64 = (at: number): number => {
+      const value = view.getBigUint64(at, true);
+      return value <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(value) : -1;
+    };
+    const wide = safe64(locator + 8);
+    if (wide < 0 || wide + 56 > locator || view.getUint32(wide, true) !== 0x06064b50) return damaged();
+    const recordSize = safe64(wide + 4);
+    if (recordSize < 44 || wide + 12 + recordSize > locator) return damaged();
+    count = safe64(wide + 32);
+    size = safe64(wide + 40);
+    offset = safe64(wide + 48);
+    directoryLimit = wide;
+  }
+  if (count < 0 || size < 0 || offset < 0 || offset + size > directoryLimit || count > size / 46) return damaged();
+  const directoryEnd = offset + size;
   const names = new Set<string>();
   for (let index = 0; index < count; index++) {
-    if (offset + 46 > end || view.getUint32(offset, true) !== 0x02014b50) return undefined;
+    if (offset + 46 > directoryEnd || view.getUint32(offset, true) !== 0x02014b50) return damaged();
     const nameLength = view.getUint16(offset + 28, true);
     const next = offset + 46 + nameLength + view.getUint16(offset + 30, true) + view.getUint16(offset + 32, true);
-    if (next > end) return undefined;
+    if (next > directoryEnd) return damaged();
     names.add(new TextDecoder().decode(bytes.subarray(offset + 46, offset + 46 + nameLength)));
     offset = next;
   }
-  if (names.has('word/document.xml')) return names.has('word/vbaProject.bin') ? 'docm' : 'docx';
-  if (names.has('xl/workbook.xml')) return names.has('xl/vbaProject.bin') ? 'xlsm' : 'xlsx';
-  if (names.has('ppt/presentation.xml')) return 'pptx';
-  return undefined;
+  if (names.has('word/document.xml')) return { format: names.has('word/vbaProject.bin') ? 'docm' : 'docx' };
+  if (names.has('xl/workbook.xml')) return { format: names.has('xl/vbaProject.bin') ? 'xlsm' : 'xlsx' };
+  if (names.has('ppt/presentation.xml')) return { format: 'pptx' };
+  return { invalid: 'ZIP 中未找到支持的 Office 文档主条目' };
+}
+
+/** Non-throwing format probe. Definite container errors are reported by resolveOfficeFormat. */
+export function detectOfficeFormat(source: ArrayBuffer | Uint8Array): OfficeFormat | undefined {
+  return inspectOfficeFormat(source).format;
+}
+
+function sameFormatFamily(left: OfficeFormat, right: OfficeFormat): boolean {
+  return left === right
+    || (['docx', 'docm'].includes(left) && ['docx', 'docm'].includes(right))
+    || (['xlsx', 'xlsm'].includes(left) && ['xlsx', 'xlsm'].includes(right));
+}
+
+/** Content chooses the renderer; a macro-enabled name may refine its OOXML family. */
+export function resolveOfficeFormat(
+  source: ArrayBuffer | Uint8Array,
+  hint: Pick<OfficeSource, 'name' | 'format'> = {},
+): OfficeFormat {
+  if (hint.format !== undefined && !inferOfficeFormat(undefined, hint.format)) {
+    throw createOfficeViewerError('UNSUPPORTED_FORMAT', '不支持此文件格式');
+  }
+  const inspected = inspectOfficeFormat(source);
+  if (inspected.invalid) throw createOfficeViewerError('INVALID_SOURCE', inspected.invalid);
+  const detected = inspected.format;
+  if (!detected) {
+    throw createOfficeViewerError(inferOfficeFormat(hint.name, hint.format) ? 'INVALID_SOURCE' : 'UNSUPPORTED_FORMAT', '无法从文件内容识别支持的文档格式');
+  }
+  if (hint.format && !sameFormatFamily(hint.format, detected)) {
+    throw createOfficeViewerError('INVALID_SOURCE', `指定格式 ${hint.format} 与文件内容 ${detected} 不匹配`);
+  }
+  const named = inferOfficeFormat(hint.name);
+  return hint.format ?? (named?.endsWith('m') && sameFormatFamily(named, detected) ? named : detected);
 }
 
 /** Always return owned bytes, so transferring to a Worker never detaches the caller's input. */
@@ -257,7 +324,7 @@ export function createWorkerAdapter<TDocument>(options: WorkerAdapterOptions): W
       if (destroyed) return Promise.reject(createOfficeViewerError('DESTROYED', 'viewer 已销毁'));
       if (request.signal?.aborted) return Promise.reject(createOfficeViewerError('ABORTED', '打开操作已取消'));
       const explicit = request.format;
-      const format = inferOfficeFormat(request.name, explicit);
+      const format = explicit === undefined ? undefined : inferOfficeFormat(undefined, explicit);
       const allowed = options.formats ?? [options.format];
       if ((explicit !== undefined && !format) || (format && !allowed.includes(format))) {
         return Promise.reject(createOfficeViewerError('UNSUPPORTED_FORMAT', options.invalidNameMessage ?? '不支持此文件格式'));
@@ -273,8 +340,8 @@ export function createWorkerAdapter<TDocument>(options: WorkerAdapterOptions): W
         void copyOfficeBytes(request.bytes).then(bytes => {
           // A Blob may finish reading after abort, replacement, or destruction.
           if (destroyed || pending?.id !== id) return;
-          const resolvedFormat = format ?? detectOfficeFormat(bytes);
-          if (!resolvedFormat || !allowed.includes(resolvedFormat)) {
+          const resolvedFormat = resolveOfficeFormat(bytes, request);
+          if (!allowed.includes(resolvedFormat)) {
             rejectPending(createOfficeViewerError('UNSUPPORTED_FORMAT', options.invalidNameMessage ?? '无法识别文件格式'), false);
             return;
           }

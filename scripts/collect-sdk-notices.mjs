@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { readdir, mkdir, cp, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { verifyPdfiumNotices } from './verify-pdfium-notices.mjs';
+import { writeAssetManifest } from './sdk-asset-manifest.mjs';
 
 // Include the actual license/notice files of crates statically linked into WASM.
 const format = process.argv[2];
@@ -38,3 +39,4 @@ if (format === 'pdf') {
   lines.push('', '## PDFium prebuilt runtime', '', 'The binary provenance, component inventory, and preserved license texts are in [licenses/pdfium/NOTICE.md](licenses/pdfium/NOTICE.md). See [BUILD_EVIDENCE.md](licenses/pdfium/BUILD_EVIDENCE.md) for the scope and limitations of the upstream build evidence. The same materials accompany the deployed runtime under assets/pdf/pdfium/. Binary and license-file hashes are checked during packaging.');
 }
 await writeFile(resolve('dist/THIRD_PARTY_NOTICES.md'), lines.join('\n') + '\n');
+await writeAssetManifest(resolve('dist'), format);

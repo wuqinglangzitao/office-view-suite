@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import test from 'node:test';
 import vm from 'node:vm';
+import { formatBytes } from './sdk-format-fixtures.mjs';
 
 const require = createRequire(new URL('../packages/viewer-pdf/package.json', import.meta.url));
 const ts = require('typescript');
@@ -88,6 +89,9 @@ test('pre-abort and invalid input create no worker', async () => {
   await assert.rejects(adapter.open({ bytes: bytes(), signal: controller.signal }), { code: 'ABORTED' });
   await assert.rejects(adapter.open({ bytes: new ArrayBuffer(0) }), { code: 'INVALID_SOURCE' });
   await assert.rejects(adapter.open({ bytes: null }), { code: 'INVALID_SOURCE' });
+  await assert.rejects(adapter.open({ bytes: Buffer.from('garbage'), format: 'pdf' }), { code: 'INVALID_SOURCE' });
+  await assert.rejects(adapter.open({ bytes: formatBytes('xlsx'), name: 'wrong.pdf' }), { code: 'UNSUPPORTED_FORMAT' });
+  await assert.rejects(adapter.open({ bytes: formatBytes('xlsx'), format: 'pdf' }), { code: 'INVALID_SOURCE' });
   assert.equal(workers.length, 0);
   adapter.destroy();
 });

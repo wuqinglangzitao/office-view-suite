@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { formatBytes, zipDirectory } from './sdk-format-fixtures.mjs';
 import {
   copyOfficeBytes,
   createWorkerAdapter,
@@ -8,7 +9,7 @@ import {
 
 const turn = () => new Promise(resolve => setImmediate(resolve));
 const rejectedWith = code => error => error.code === code;
-const input = () => ({ format: 'docx', bytes: new Uint8Array([1, 2, 3]) });
+const input = () => ({ format: 'docx', bytes: formatBytes('docx') });
 
 class FakeWorker {
   messages = [];
@@ -33,13 +34,16 @@ function setup(extra = {}) {
 }
 
 test('caller buffers remain usable after Worker transfer, including subarray bounds', async () => {
-  for (const source of [new Uint8Array([9, 1, 2, 8]).subarray(1, 3), new Uint8Array([1, 2]).buffer, new Blob([new Uint8Array([1, 2])])]) {
+  const expected = formatBytes('docx');
+  const surrounded = new Uint8Array(expected.length + 2);
+  surrounded.set(expected, 1);
+  for (const source of [surrounded.subarray(1, expected.length + 1), new Uint8Array(expected).buffer, new Blob([expected])]) {
     const { adapter, workers } = setup({ workerData: { wasmUrl: '/office/word/parser.wasm' } });
     const opened = adapter.open({ bytes: source, format: 'docx' });
     await turn();
-    assert.deepEqual([...new Uint8Array(workers[0].messages[0].bytes)], [1, 2]);
+    assert.deepEqual([...new Uint8Array(workers[0].messages[0].bytes)], [...expected]);
     assert.equal(workers[0].messages[0].wasmUrl, '/office/word/parser.wasm');
-    assert.deepEqual([...new Uint8Array(await copyOfficeBytes(source))], [1, 2]);
+    assert.deepEqual([...new Uint8Array(await copyOfficeBytes(source))], [...expected]);
     workers[0].reply();
     assert.deepEqual((await opened).warnings, [{ code: 'DOCUMENT_WARNING', message: 'font fallback' }]);
     adapter.destroy();
@@ -132,22 +136,6 @@ test('Worker construction, load, and message errors allow a clean retry', async 
     adapter.destroy();
   }
 });
-
-function zipDirectory(names) {
-  const records = names.map(name => {
-    const nameBytes = Buffer.from(name);
-    const record = Buffer.alloc(46 + nameBytes.length);
-    record.writeUInt32LE(0x02014b50);
-    record.writeUInt16LE(nameBytes.length, 28);
-    nameBytes.copy(record, 46);
-    return record;
-  });
-  const end = Buffer.alloc(22);
-  end.writeUInt32LE(0x06054b50);
-  end.writeUInt16LE(names.length, 10);
-  end.writeUInt32LE(records.reduce((total, record) => total + record.length, 0), 12);
-  return Buffer.concat([...records, end]);
-}
 
 test('format detection reads OOXML ZIP directory names and PDF signatures without a file name', async () => {
   for (const [names, format] of [

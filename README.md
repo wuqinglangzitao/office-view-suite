@@ -13,7 +13,7 @@
 | 文档 | 扩展名 | 预览方式 |
 | --- | --- | --- |
 | Word | `.doc`、`.docx`、`.docm` | DOM 渲染，渐进分页 |
-| Excel | `.xlsx`、`.xlsm` | DOM 表格，工作表切换 |
+| Excel | `.xlsx`、`.xlsm` | 当前工作表懒挂载，大表可见区域渲染 |
 | PowerPoint | `.pptx` | DOM / SVG 渲染，按容器宽度适配 |
 | PDF | `.pdf` | PDFium + Canvas，按可见页面懒渲染 |
 
@@ -115,6 +115,7 @@ SDK 运行时代码位于 `packages/`；文件选择等演示交互位于 `apps/
 | `pnpm typecheck` | 检查整个工作区的 TypeScript 类型 |
 | `pnpm test` | 运行 Node.js SDK 回归测试 |
 | `pnpm test:packages` | 打包、核对许可材料，在独立临时项目安装并构建 |
+| `pnpm test:excel` | Excel 大表性能、工作表切换与布局回归（需要 Playwright） |
 | `pnpm verify:pdfium` | 离线核对 PDFium 二进制、许可文本哈希和组件引用 |
 | `pnpm wasm` | 重建所有 Rust/WASM 产物 |
 

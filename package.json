@@ -19,6 +19,7 @@
     "test:packages": "node scripts/verify-packed-sdk.mjs",
     "test:browser": "node scripts/browser-sdk-smoke.mjs",
     "test:visual": "node scripts/visual-sdk-regression.mjs",
+    "test:excel": "node scripts/excel-preview-regression.mjs",
     "verify:pdfium": "node scripts/verify-pdfium-notices.mjs",
     "typecheck": "pnpm --workspace-concurrency=1 --recursive run typecheck",
     "typecheck:ppt": "pnpm --filter ppt-view typecheck",
