@@ -1,0 +1,19 @@
+{
+  "name": "office-view-suite-vue2-fixture",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node ../../scripts/prepare-vue2-fixture.mjs && vite",
+    "build": "node ../../scripts/prepare-vue2-fixture.mjs && vite build"
+  },
+  "dependencies": {
+    "@office-view-suite/viewer": "workspace:*",
+    "vue": "2.7.16"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue2": "2.3.4",
+    "vite": "6.4.4"
+  }
+}

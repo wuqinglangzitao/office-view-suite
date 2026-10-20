@@ -8,6 +8,7 @@ import { verifyPdfiumNotices } from './verify-pdfium-notices.mjs';
 import { verifyAssetManifest } from './sdk-asset-manifest.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
+const projectLicense = await readFile(resolve(root, 'LICENSE'));
 const pdfiumSource = resolve(root, 'third_party/pdfium');
 const pdfium = await verifyPdfiumNotices(pdfiumSource);
 const consumer = await mkdtemp(resolve(tmpdir(), 'office-sdk-consumer-'));
@@ -21,6 +22,10 @@ for (const name of packages) {
   const file = `office-view-suite-${name}-0.1.0.tgz`;
   const listing = execFileSync('tar', ['-tzf', resolve(tarballs, file)], { encoding: 'utf8' });
   if (/\/(?:node_modules|vendor|target|samples|src)\//m.test(listing)) throw new Error(`Unexpected package files: ${name}`);
+  const packedLicense = execFileSync('tar', ['-xOf', resolve(tarballs, file), 'package/dist/LICENSE']);
+  if (!packedLicense.equals(projectLicense)) throw new Error(`Packed project license differs from source: ${name}`);
+  const packedMetadata = JSON.parse(execFileSync('tar', ['-xOf', resolve(tarballs, file), 'package/package.json'], { encoding: 'utf8' }));
+  if (packedMetadata.license !== 'Apache-2.0') throw new Error(`Missing Apache-2.0 package metadata: ${name}`);
   if (name === 'viewer-pdf') {
     const entries = new Set(listing.trim().split('\n'));
     const documents = ['SOURCE.md', 'NOTICE.md', 'BUILD_EVIDENCE.md', 'provenance.json', ...pdfium.licenseFiles.map(entry => entry.path)];

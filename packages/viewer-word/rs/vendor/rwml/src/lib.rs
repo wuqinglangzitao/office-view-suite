@@ -72,6 +72,7 @@ mod report;
 mod stsh;
 mod table;
 mod text;
+mod typography;
 mod util;
 pub mod wasm;
 #[cfg(feature = "docx")]
@@ -89,14 +90,15 @@ pub use builder::{
     ParagraphBuilder, ParagraphStyleBuilder, RevisionBuilder, RunBuilder, TableBuilder,
 };
 pub use error::{Error, Result};
+pub use typography::PreviewTypography;
 pub use model::{
     Align, AuthoredComment, AuthoredContentControl, AuthoredNote, AuthoredRevision, Block, Cell,
-    CellMargins, CharProps, Chart, ChartKind, ChartSeries, ChartShape, Color, DocGrid, DocGridType,
-    DocMeta, DocModel, DocSetup, FieldRole, FieldUnsupportedReason, Image, Indent, ListInfo,
-    PageNumberFormat, PageSetup, ParaProps, Paragraph, ParagraphStyle, Row, Run, SectionBreakKind,
-    SectionSetup, SourceRegion, SourceRegionKind, Spacing, Stats, Table, TableBorderColors,
-    TableBorderSide, TableBorderSizes, TableBorderStyle, TableBorderStyles, TextDirection, VCell,
-    VertAlign, WebExtensionTaskPane,
+    CellBorder, CellBorders, CellMargins, CharProps, Chart, ChartKind, ChartSeries, ChartShape,
+    Color, DocGrid, DocGridType, DocMeta, DocModel, DocSetup, FieldRole, FieldUnsupportedReason,
+    Image, ImageAnchor, ImageDrawingLayout, Indent, ListInfo, PageNumberFormat, PageSetup, ParaProps, Paragraph, ParagraphStyle,
+    Row, Run, SectionBreakKind, SectionSetup, SourceRegion, SourceRegionKind, Spacing, Stats,
+    Table, TableBorderColors, TableBorderSide, TableBorderSizes, TableBorderStyle,
+    TableBorderStyles, TextDirection, VCell, VertAlign, WebExtensionTaskPane,
 };
 #[cfg(feature = "render")]
 pub use render::LayoutPages;
@@ -541,6 +543,323 @@ enum Backend {
     Docx(Box<docx::DocxState>),
 }
 
+/// A source paragraph tab stop, expressed in points from the text area's left edge.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PreviewTabStop {
+    /// Distance from the paragraph's text-area origin, in points.
+    pub position_pt: f32,
+    /// Source alignment: `left`, `center`, `right`, `decimal`, `bar`, or `clear`.
+    pub alignment: &'static str,
+    /// Source leader: `none`, `dot`, `hyphen`, `underscore`, `heavy`, or `middleDot`.
+    pub leader: &'static str,
+}
+
+/// Paragraph controls indexed by block position at every level of a preview model.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewParagraphLayout {
+    /// Keep this paragraph with the following paragraph when possible.
+    pub keep_next: bool,
+    /// Keep this paragraph's lines together when they fit on one page.
+    pub keep_lines: bool,
+    /// Avoid a single line at either side of a page break.
+    pub widow_control: bool,
+    /// A validated source line-spacing rule (`exact`/`atLeast`) and point value.
+    pub line_spacing: Option<(&'static str, f32)>,
+    /// Resolved explicit tab stops, including source leader and alignment.
+    pub tab_stops: Vec<PreviewTabStop>,
+    /// Recursive table controls indexed by row, cell, then cell block position.
+    pub table_cells: Vec<Vec<Vec<PreviewParagraphLayout>>>,
+    /// True for source table rows that prohibit splitting across pages.
+    pub table_row_cant_split: Vec<bool>,
+    /// Unicode character offsets of explicit column breaks in source paragraphs.
+    pub column_break_offsets: Vec<usize>,
+}
+
+/// Source column geometry in one section, including its reading order.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewSectionColumns {
+    /// Gap between equal-width columns, in points.
+    pub gap_pt: Option<f32>,
+    /// Explicit unequal column widths, in points.
+    pub widths_pt: Vec<f32>,
+    /// Space after each unequal column, in points.
+    pub spaces_pt: Vec<f32>,
+    /// Whether a separator should be drawn between columns.
+    pub separator: bool,
+    /// Whether columns are populated from right to left.
+    pub rtl: bool,
+}
+
+/// Preview paragraph controls for all six running surfaces of one section.
+#[derive(Debug, Clone, Default)]
+pub struct PreviewRunningParagraphLayouts {
+    /// Default header controls, indexed by block position.
+    pub header: Vec<PreviewParagraphLayout>,
+    /// First-page header controls, indexed by block position.
+    pub first_header: Vec<PreviewParagraphLayout>,
+    /// Even-page header controls, indexed by block position.
+    pub even_header: Vec<PreviewParagraphLayout>,
+    /// Default footer controls, indexed by block position.
+    pub footer: Vec<PreviewParagraphLayout>,
+    /// First-page footer controls, indexed by block position.
+    pub first_footer: Vec<PreviewParagraphLayout>,
+    /// Even-page footer controls, indexed by block position.
+    pub even_footer: Vec<PreviewParagraphLayout>,
+}
+
+/// Read-only preview projection. Source-only hints remain outside the editable model.
+#[derive(Debug)]
+pub struct PreviewLayout {
+    /// Explicit source compatibility controls; absent settings stay disabled.
+    pub typography: PreviewTypography,
+    /// Source preview blocks, preserving cached TOC results from the document.
+    pub model: DocModel,
+    /// Paragraph controls indexed by top-level block position.
+    pub paragraphs: Vec<PreviewParagraphLayout>,
+    /// Header/footer point distances indexed by section, including the final one.
+    pub running_distances: Vec<(Option<f32>, Option<f32>)>,
+    /// Source boundary types omitted or normalized by the public section model.
+    pub section_break_types: Vec<Option<&'static str>>,
+    /// Source default tab interval; `None` uses Word's half-inch default.
+    pub default_tab_stop_pt: Option<f32>,
+    /// Running-surface controls by section, including the final section.
+    pub running_paragraphs: Vec<PreviewRunningParagraphLayouts>,
+    /// Column layout indexed by section, including the final section.
+    pub section_columns: Vec<PreviewSectionColumns>,
+}
+
+fn preview_paragraph_layouts(
+    pagination: &[model::PaginationHint],
+    spacing: &[Option<model::LineSpacingHint>],
+    count: usize,
+) -> Vec<PreviewParagraphLayout> {
+    (0..count)
+        .map(|index| {
+            let pagination = pagination.get(index).copied().unwrap_or_default();
+            PreviewParagraphLayout {
+                keep_next: pagination.keep_next,
+                keep_lines: pagination.keep_lines,
+                widow_control: pagination.widow_control,
+                line_spacing: spacing
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .map(|hint| match hint {
+                        model::LineSpacingHint::Exact(value) => ("exact", value),
+                        model::LineSpacingHint::AtLeast(value) => ("atLeast", value),
+                    }),
+                ..PreviewParagraphLayout::default()
+            }
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "docx", feature = "render"))]
+fn preview_tab_stops(tabs: &[model::TabStop]) -> Vec<PreviewTabStop> {
+    tabs.iter()
+        .map(|tab| PreviewTabStop {
+            position_pt: tab.position_pt,
+            alignment: match tab.alignment {
+                model::TabAlignment::Left => "left",
+                model::TabAlignment::Center => "center",
+                model::TabAlignment::Right => "right",
+                model::TabAlignment::Decimal => "decimal",
+                model::TabAlignment::Bar => "bar",
+                model::TabAlignment::Clear => "clear",
+            },
+            leader: match tab.leader {
+                model::TabLeader::None => "none",
+                model::TabLeader::Dot => "dot",
+                model::TabLeader::Hyphen => "hyphen",
+                model::TabLeader::Underscore => "underscore",
+                model::TabLeader::Heavy => "heavy",
+                model::TabLeader::MiddleDot => "middleDot",
+                #[cfg(feature = "render")]
+                model::TabLeader::Bar => "bar",
+            },
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "docx", feature = "render"))]
+fn preview_table_paragraphs(
+    table: &Table,
+    pagination: Option<&model::TableCellPaginationHints>,
+    spacing: Option<&model::TableCellLineSpacingHints>,
+    tabs: Option<&model::TableCellTabStopHints>,
+    nested: Option<&model::TableCellNestedPaginationHints>,
+) -> Vec<Vec<Vec<PreviewParagraphLayout>>> {
+    table
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(row_index, row)| {
+            row.cells
+                .iter()
+                .enumerate()
+                .map(|(cell_index, cell)| {
+                    cell.blocks
+                        .iter()
+                        .enumerate()
+                        .map(|(block_index, block)| {
+                            let pagination = pagination
+                                .and_then(|rows| rows.get(row_index))
+                                .and_then(|row| row.get(cell_index))
+                                .and_then(|cell| cell.get(block_index))
+                                .copied().flatten().unwrap_or_default();
+                            let spacing = spacing
+                                .and_then(|rows| rows.get(row_index))
+                                .and_then(|row| row.get(cell_index))
+                                .and_then(|cell| cell.get(block_index))
+                                .copied().flatten();
+                            let source_tabs = tabs
+                                .and_then(|rows| rows.get(row_index))
+                                .and_then(|row| row.get(cell_index))
+                                .and_then(|cell| cell.get(block_index));
+                            let nested_hints = nested
+                                .and_then(|rows| rows.get(row_index))
+                                .and_then(|row| row.get(cell_index))
+                                .and_then(|cell| cell.get(block_index))
+                                .and_then(Option::as_ref);
+                            PreviewParagraphLayout {
+                                keep_next: pagination.keep_next,
+                                keep_lines: pagination.keep_lines,
+                                widow_control: pagination.widow_control,
+                                line_spacing: spacing.map(|hint| match hint {
+                                    model::LineSpacingHint::Exact(value) => ("exact", value),
+                                    model::LineSpacingHint::AtLeast(value) => ("atLeast", value),
+                                }),
+                                tab_stops: preview_tab_stops(
+                                    source_tabs.map(Vec::as_slice).unwrap_or_default(),
+                                ),
+                                table_cells: if let Block::Table(table) = block {
+                                    preview_table_paragraphs(
+                                        table,
+                                        nested_hints.map(|hints| &hints.cells),
+                                        nested_hints.map(|hints| &hints.cell_line_spacing),
+                                        nested_hints.map(|hints| &hints.cell_tabs),
+                                        nested_hints.map(|hints| &hints.nested),
+                                    )
+                                } else {
+                                    Vec::new()
+                                },
+                                table_row_cant_split: nested_hints
+                                    .map(|hints| hints.rows.iter().map(|row| row.cant_split).collect())
+                                    .unwrap_or_default(),
+                                ..PreviewParagraphLayout::default()
+                            }
+                        })
+                        .collect()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+#[cfg(any(feature = "docx", feature = "render"))]
+fn preview_apply_block_layouts(
+    layouts: &mut [PreviewParagraphLayout],
+    blocks: &[Block],
+    table_pagination: &[model::TableCellPaginationHints],
+    table_spacing: &[model::TableCellLineSpacingHints],
+    tabs: &[Vec<model::TabStop>],
+    table_tabs: &[model::TableCellTabStopHints],
+    nested: &[model::TableCellNestedPaginationHints],
+) {
+    for (index, (layout, block)) in layouts.iter_mut().zip(blocks).enumerate() {
+        layout.tab_stops =
+            preview_tab_stops(tabs.get(index).map(Vec::as_slice).unwrap_or_default());
+        if let Block::Table(table) = block {
+            layout.table_cells = preview_table_paragraphs(
+                table, table_pagination.get(index), table_spacing.get(index),
+                table_tabs.get(index), nested.get(index),
+            );
+        }
+    }
+}
+
+#[cfg(any(feature = "docx", feature = "render"))]
+fn preview_running_paragraphs(
+    model: &DocModel,
+    tabs: &[model::RunningSurfaceTabStopHints],
+    table_tabs: &[model::RunningSurfaceTableCellTabStopHints],
+    spacing: &[model::RunningSurfaceLineSpacingHints],
+    #[cfg(feature = "docx")] pagination: &[model::RunningSurfacePaginationHints],
+    #[cfg(feature = "docx")] nested: &[model::RunningSurfaceTableLayoutHints],
+) -> Vec<PreviewRunningParagraphLayouts> {
+    let final_section = SectionSetup::from(&model.setup);
+    model
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::SectionBreak(section) => Some(section),
+            _ => None,
+        })
+        .chain(std::iter::once(&final_section))
+        .enumerate()
+        .map(|(index, section)| {
+            let empty_tabs = model::RunningSurfaceTabStopHints::default();
+            let empty_table_tabs = model::RunningSurfaceTableCellTabStopHints::default();
+            let tabs = tabs.get(index).unwrap_or(&empty_tabs);
+            let table_tabs = table_tabs.get(index).unwrap_or(&empty_table_tabs);
+            let empty_spacing = model::RunningSurfaceLineSpacingHints::default();
+            let spacing = spacing.get(index).unwrap_or(&empty_spacing);
+            #[cfg(feature = "docx")]
+            let empty_pagination = model::RunningSurfacePaginationHints::default();
+            #[cfg(feature = "docx")]
+            let pagination = pagination.get(index).unwrap_or(&empty_pagination);
+            #[cfg(feature = "docx")]
+            let empty_nested = model::RunningSurfaceTableLayoutHints::default();
+            #[cfg(feature = "docx")]
+            let nested = nested.get(index).unwrap_or(&empty_nested);
+            macro_rules! surface {
+                ($name:ident, $cell_spacing:ident) => {{
+                    let blocks = &section.$name;
+                    #[cfg(feature = "docx")]
+                    let paragraph_pagination = pagination.$name.paragraphs.as_slice();
+                    #[cfg(not(feature = "docx"))]
+                    let paragraph_pagination = &[];
+                    let mut layouts = preview_paragraph_layouts(
+                        paragraph_pagination,
+                        &spacing.$name,
+                        blocks.len(),
+                    );
+                    #[cfg(feature = "docx")]
+                    let nested_tables = nested.$name.nested_tables.as_slice();
+                    #[cfg(not(feature = "docx"))]
+                    let nested_tables = &[];
+                    #[cfg(feature = "docx")]
+                    let cell_pagination = pagination.$name.table_cells.as_slice();
+                    #[cfg(not(feature = "docx"))]
+                    let cell_pagination = &[];
+                    preview_apply_block_layouts(
+                        &mut layouts,
+                        blocks,
+                        cell_pagination,
+                        &spacing.$cell_spacing,
+                        &tabs.$name,
+                        &table_tabs.$name,
+                        nested_tables,
+                    );
+                    #[cfg(feature = "docx")]
+                    for (layout, rows) in layouts.iter_mut().zip(&pagination.$name.table_rows) {
+                        layout.table_row_cant_split = rows.iter().map(|row| row.cant_split).collect();
+                    }
+                    layouts
+                }};
+            }
+            PreviewRunningParagraphLayouts {
+                header: surface!(header, header_table_cells),
+                first_header: surface!(first_header, first_header_table_cells),
+                even_header: surface!(even_header, even_header_table_cells),
+                footer: surface!(footer, footer_table_cells),
+                first_footer: surface!(first_footer, first_footer_table_cells),
+                even_footer: surface!(even_footer, even_footer_table_cells),
+            }
+        })
+        .collect()
+}
+
 /// Legacy `.doc` state: decoded text plus the FIB and retained structures for
 /// the lazy rich-model build.
 struct DocState {
@@ -721,6 +1040,157 @@ impl Document {
                 let mut m = d.model.clone();
                 m.blocks.extend(d.notes.iter().cloned());
                 m
+            }
+        }
+    }
+
+    /// Build the source read view together with source layout
+    /// controls used by browser preview. Paragraph hints preserve source tab stops
+    /// through nested tables. Running controls address section boundaries followed
+    /// by the final section; the preview preserves source field-result content
+    /// and excludes promoted running surfaces from the body.
+    pub fn model_with_layout_hints(&self) -> PreviewLayout {
+        match &self.backend {
+            Backend::Doc(state) => {
+                #[allow(unused_mut)]
+                let mut assembled = legacy_build_output_from_doc_state(state);
+                #[cfg(feature = "docx")]
+                legacy_project_promoted_running_surfaces(&mut assembled);
+                #[allow(unused_mut)]
+                let mut paragraphs = preview_paragraph_layouts(
+                    &assembled.pagination_hints,
+                    &assembled.line_spacing_hints,
+                    assembled.model.blocks.len(),
+                );
+                #[cfg(any(feature = "docx", feature = "render"))]
+                preview_apply_block_layouts(
+                    &mut paragraphs,
+                    &assembled.model.blocks,
+                    &assembled.table_cell_pagination,
+                    &assembled.table_cell_line_spacing,
+                    &assembled.tab_stops,
+                    &assembled.table_cell_tab_stops,
+                    &[],
+                );
+                for (layout, rows) in paragraphs.iter_mut().zip(&assembled.table_row_pagination) {
+                    layout.table_row_cant_split = rows.iter().map(|row| row.cant_split).collect();
+                }
+                for (layout, offsets) in paragraphs.iter_mut().zip(&assembled.column_break_offsets) {
+                    layout.column_break_offsets = offsets.clone();
+                }
+                #[cfg(any(feature = "docx", feature = "render"))]
+                let running_paragraphs = preview_running_paragraphs(
+                    &assembled.model,
+                    &assembled.running_tab_stops,
+                    &assembled.running_table_cell_tab_stops,
+                    &assembled.running_line_spacing_hints,
+                    #[cfg(feature = "docx")]
+                    &assembled.running_pagination_hints,
+                    #[cfg(feature = "docx")]
+                    &[],
+                );
+                #[cfg(not(any(feature = "docx", feature = "render")))]
+                let running_paragraphs = Vec::new();
+                PreviewLayout {
+                    typography: fib::fc_lcb_pair(&state.word, 31)
+                        .and_then(|(fc, len)| state.table.get(fc..fc.checked_add(len)?))
+                        .map(typography::from_dop).unwrap_or_default(),
+                    model: assembled.model,
+                    paragraphs,
+                    running_distances: assembled
+                        .running_surface_distances
+                        .iter()
+                        .map(|distance| (distance.header_pt, distance.footer_pt))
+                        .collect(),
+                    section_break_types: Vec::new(),
+                    default_tab_stop_pt: None,
+                    running_paragraphs,
+                    section_columns: Vec::new(),
+                }
+            }
+            #[cfg(feature = "docx")]
+            Backend::Docx(state) => {
+                let state = docx::source_preview_layout(state);
+                let mut model = state.model;
+                let body_count = model.blocks.len();
+                model.blocks.extend(state.notes.iter().cloned());
+                let mut paragraphs = preview_paragraph_layouts(
+                    &state.pagination_hints,
+                    &state.line_spacing_hints,
+                    body_count,
+                );
+                preview_apply_block_layouts(
+                    &mut paragraphs,
+                    &model.blocks[..body_count],
+                    &state.table_cell_pagination,
+                    &state.table_cell_line_spacing,
+                    &state.tab_stops,
+                    &state.table_cell_tab_stops,
+                    &state.table_nested_pagination,
+                );
+                for (layout, rows) in paragraphs.iter_mut().zip(&state.table_row_pagination) {
+                    layout.table_row_cant_split = rows.iter().map(|row| row.cant_split).collect();
+                }
+                for (layout, offsets) in paragraphs.iter_mut().zip(&state.column_break_offsets) {
+                    layout.column_break_offsets = offsets.clone();
+                }
+                let mut section_columns = Vec::new();
+                for (index, block) in model.blocks[..body_count].iter().enumerate() {
+                    if !matches!(block, Block::SectionBreak(_)) { continue; }
+                    let geometry = state.section_column_layouts.get(index).and_then(Option::as_ref);
+                    section_columns.push(PreviewSectionColumns {
+                        gap_pt: state.section_column_gap_pt.get(index).copied().flatten(),
+                        widths_pt: geometry.map(|layout| layout.columns.iter().map(|column| column.width_pt).collect()).unwrap_or_default(),
+                        spaces_pt: geometry.map(|layout| layout.columns.iter().map(|column| column.space_after_pt).collect()).unwrap_or_default(),
+                        separator: state.section_column_separators.get(index).copied().unwrap_or(false),
+                        rtl: state.section_column_rtl.get(index).copied().unwrap_or(false),
+                    });
+                }
+                let geometry = state.final_section_column_layout.as_ref();
+                section_columns.push(PreviewSectionColumns {
+                    gap_pt: state.final_section_column_gap_pt,
+                    widths_pt: geometry.map(|layout| layout.columns.iter().map(|column| column.width_pt).collect()).unwrap_or_default(),
+                    spaces_pt: geometry.map(|layout| layout.columns.iter().map(|column| column.space_after_pt).collect()).unwrap_or_default(),
+                    separator: state.final_section_column_separator,
+                    rtl: state.final_section_column_rtl,
+                });
+                let mut note_layouts = preview_paragraph_layouts(
+                    &[],
+                    &state.note_line_spacing_hints,
+                    state.notes.len(),
+                );
+                preview_apply_block_layouts(
+                    &mut note_layouts,
+                    &state.notes,
+                    &[],
+                    &[],
+                    &state.note_tab_stops,
+                    &state.note_table_cell_tab_stops,
+                    &state.note_table_nested_pagination,
+                );
+                paragraphs.extend(note_layouts);
+                let running_paragraphs = preview_running_paragraphs(
+                    &model,
+                    &state.running_tab_stops,
+                    &state.running_table_cell_tab_stops,
+                    &state.running_line_spacing_hints,
+                    &state.running_pagination_hints,
+                    &state.running_table_layout_hints,
+                );
+                PreviewLayout {
+                    typography: state.typography,
+                    model,
+                    paragraphs,
+                    running_distances: state
+                        .running_surface_distances
+                        .iter()
+                        .map(|distance| (distance.header_pt, distance.footer_pt))
+                        .collect(),
+                    section_break_types: state.section_break_types,
+                    default_tab_stop_pt: state.default_tab_stop_pt,
+                    running_paragraphs,
+                    section_columns,
+                }
             }
         }
     }
@@ -7602,6 +8072,24 @@ mod tests {
 
     #[cfg(feature = "docx")]
     #[test]
+    fn legacy_preview_excludes_promoted_running_regions_without_changing_read_model() {
+        let bytes =
+            synth_doc_with_ccp("BODYFTNHEADANNENDBOX", "", 0x00C1, 0, 0, [4, 3, 4, 3, 3, 3]);
+        let doc = Document::open(&bytes).unwrap();
+        let original = doc.model();
+        let preview = doc.model_with_layout_hints();
+        let body = export::markdown::render(&preview.model);
+        assert!(!body.contains("HEAD"), "promoted header leaked into preview body");
+        for retained in ["BODY", "FTN", "ANN", "END", "BOX"] {
+            assert!(body.contains(retained), "lost source region {retained}");
+        }
+        assert!(matches!(&preview.model.setup.header[0], Block::Paragraph(p) if p.text() == "HEAD"));
+        assert_eq!(preview.paragraphs.len(), preview.model.blocks.len());
+        assert_eq!(doc.model(), original);
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
     fn legacy_fresh_conversion_projects_only_promoted_running_regions_from_body() {
         let bytes =
             synth_doc_with_ccp("BODYFTNHEADANNENDBOX", "", 0x00C1, 0, 0, [4, 3, 4, 3, 3, 3]);
@@ -11503,6 +11991,255 @@ mod tests {
         zw.finish().unwrap().into_inner()
     }
 
+    #[cfg(feature = "docx")]
+    #[test]
+    fn preview_source_tabs_survive_body_nested_tables_and_notes() {
+        let body = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+          <w:p><w:r><w:t>before</w:t></w:r></w:p>
+          <w:p><w:pPr><w:pStyle w:val="Contents"/></w:pPr><w:r><w:t>entry</w:t><w:tab/><w:t>8</w:t></w:r></w:p>
+          <w:tbl><w:tr><w:tc>
+            <w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="1920"/></w:tabs></w:pPr><w:r><w:t>cell</w:t><w:tab/><w:t>center</w:t></w:r></w:p>
+            <w:tbl><w:tr><w:tc><w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="underscore" w:pos="2880"/></w:tabs></w:pPr><w:r><w:t>nested</w:t><w:tab/><w:t>right</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+            <w:p><w:r><w:t>after nested</w:t></w:r></w:p>
+          </w:tc></w:tr></w:tbl>
+          <w:p><w:r><w:t>after</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let styles = r#"<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:style w:type="paragraph" w:styleId="Contents"><w:name w:val="Contents"/><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="8640"/></w:tabs></w:pPr></w:style></w:styles>"#;
+        let mut package =
+            crate::opc::Package::from_zip(&minimal_docx_with_styles(body, styles)).unwrap();
+        package.set_part("word/settings.xml", br#"<w:settings xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:defaultTabStop w:val="960"/></w:settings>"#.to_vec(), None);
+        package.set_part("word/footnotes.xml", br#"<w:footnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:footnote w:id="1"><w:p><w:pPr><w:spacing w:line="300" w:lineRule="exact"/><w:tabs><w:tab w:val="right" w:leader="hyphen" w:pos="2400"/></w:tabs></w:pPr><w:r><w:t>footnote</w:t><w:tab/><w:t>end</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="1800"/></w:tabs></w:pPr><w:r><w:t>note cell</w:t><w:tab/><w:t>end</w:t></w:r></w:p></w:tc></w:tr></w:tbl></w:footnote></w:footnotes>"#.to_vec(), None);
+        package.set_part("word/endnotes.xml", br#"<w:endnotes xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:endnote w:id="1"><w:p><w:pPr><w:tabs><w:tab w:val="decimal" w:leader="middleDot" w:pos="1200"/></w:tabs></w:pPr><w:r><w:t>endnote</w:t><w:tab/><w:t>1.2</w:t></w:r></w:p></w:endnote></w:endnotes>"#.to_vec(), None);
+        let document = Document::open(&package.to_zip().unwrap()).unwrap();
+        let preview = document.model_with_layout_hints();
+        assert_eq!(preview.default_tab_stop_pt, Some(48.0));
+        assert_eq!(preview.paragraphs.len(), preview.model.blocks.len());
+        assert_eq!(preview.paragraphs.len(), 7);
+        assert!(preview.paragraphs[0].tab_stops.is_empty());
+        assert_eq!(
+            preview.paragraphs[1].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 432.0,
+                alignment: "right",
+                leader: "dot"
+            }]
+        );
+        let cell = &preview.paragraphs[2].table_cells[0][0];
+        assert_eq!(cell.len(), 3);
+        assert_eq!(
+            cell[0].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 96.0,
+                alignment: "center",
+                leader: "none"
+            }]
+        );
+        assert_eq!(
+            cell[1].table_cells[0][0][0].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 144.0,
+                alignment: "right",
+                leader: "underscore"
+            }]
+        );
+        assert!(cell[2].tab_stops.is_empty());
+        assert!(preview.paragraphs[3].tab_stops.is_empty());
+        assert_eq!(preview.paragraphs[4].line_spacing, Some(("exact", 15.0)));
+        assert_eq!(
+            preview.paragraphs[4].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 120.0,
+                alignment: "right",
+                leader: "hyphen"
+            }]
+        );
+        assert_eq!(
+            preview.paragraphs[5].table_cells[0][0][0].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 90.0,
+                alignment: "center",
+                leader: "none"
+            }]
+        );
+        assert_eq!(
+            preview.paragraphs[6].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 60.0,
+                alignment: "decimal",
+                leader: "middleDot"
+            }]
+        );
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
+    fn preview_running_tabs_align_all_variants_sections_and_nested_tables() {
+        let mut refs = String::new();
+        let mut rels = String::from(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        );
+        let mut parts = Vec::new();
+        for (index, (kind, variant)) in [
+            ("header", "default"),
+            ("header", "first"),
+            ("header", "even"),
+            ("footer", "default"),
+            ("footer", "first"),
+            ("footer", "even"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            refs.push_str(&format!(
+                r#"<w:{kind}Reference w:type="{variant}" r:id="r{index}"/>"#
+            ));
+            rels.push_str(&format!(r#"<Relationship Id="r{index}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/{kind}" Target="part{index}.xml"/>"#));
+            let position = (index + 1) * 720;
+            let root = if kind == "header" { "hdr" } else { "ftr" };
+            let xml = format!(
+                r#"<w:{root} xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:p/><w:p><w:pPr><w:tabs><w:tab w:val="center" w:pos="{position}"/></w:tabs></w:pPr><w:r><w:t>running</w:t><w:tab/><w:t>center</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="{position}"/></w:tabs></w:pPr><w:r><w:t>cell</w:t><w:tab/><w:t>end</w:t></w:r></w:p><w:tbl><w:tr><w:tc><w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="hyphen" w:pos="{position}"/></w:tabs></w:pPr><w:r><w:t>nested</w:t><w:tab/><w:t>end</w:t></w:r></w:p></w:tc></w:tr></w:tbl><w:p/></w:tc></w:tr></w:tbl></w:{root}>"#
+            );
+            let xml = xml.replacen(
+                "<w:pPr><w:tabs>",
+                r#"<w:pPr><w:keepNext/><w:spacing w:line="280" w:lineRule="exact"/><w:tabs>"#,
+                1,
+            );
+            let xml = xml.replacen(
+                "<w:pPr><w:tabs>",
+                r#"<w:pPr><w:keepLines/><w:spacing w:line="560" w:lineRule="exact"/><w:tabs>"#,
+                1,
+            );
+            let xml = xml.replacen(
+                "<w:pPr><w:tabs>",
+                r#"<w:pPr><w:keepNext/><w:spacing w:line="400" w:lineRule="atLeast"/><w:tabs>"#,
+                1,
+            );
+            parts.push((format!("word/part{index}.xml"), xml));
+        }
+        rels.push_str("</Relationships>");
+        let xml = format!(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:body><w:p><w:pPr><w:sectPr>{refs}<w:titlePg/></w:sectPr></w:pPr><w:r><w:t>first section</w:t></w:r></w:p><w:p><w:r><w:t>last section</w:t></w:r></w:p><w:sectPr>{refs}<w:titlePg/></w:sectPr></w:body></w:document>"#
+        );
+        let mut package = crate::opc::Package::from_zip(&minimal_docx(&xml)).unwrap();
+        package.set_part("word/_rels/document.xml.rels", rels.into_bytes(), None);
+        for (path, xml) in parts {
+            package.set_part(&path, xml.into_bytes(), None);
+        }
+        let document = Document::open(&package.to_zip().unwrap()).unwrap();
+        let preview = document.model_with_layout_hints();
+        assert_eq!(preview.running_paragraphs.len(), 2);
+        for running in &preview.running_paragraphs {
+            for (index, layouts) in [
+                &running.header,
+                &running.first_header,
+                &running.even_header,
+                &running.footer,
+                &running.first_footer,
+                &running.even_footer,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let position_pt = (index + 1) as f32 * 36.0;
+                assert_eq!(layouts.len(), 3, "variant {index}");
+                assert!(layouts[0].tab_stops.is_empty());
+                assert!(layouts[1].keep_next);
+                assert_eq!(layouts[1].line_spacing, Some(("exact", 14.0)));
+                assert_eq!(
+                    layouts[1].tab_stops,
+                    vec![PreviewTabStop {
+                        position_pt,
+                        alignment: "center",
+                        leader: "none"
+                    }]
+                );
+                let cell = &layouts[2].table_cells[0][0];
+                assert!(cell[0].keep_lines);
+                assert_eq!(cell[0].line_spacing, Some(("exact", 28.0)));
+                assert!(cell[1].table_cells[0][0][0].keep_next);
+                assert_eq!(cell[1].table_cells[0][0][0].line_spacing, Some(("atLeast", 20.0)));
+                assert_eq!(
+                    cell[0].tab_stops,
+                    vec![PreviewTabStop {
+                        position_pt,
+                        alignment: "right",
+                        leader: "dot"
+                    }]
+                );
+                assert_eq!(
+                    cell[1].table_cells[0][0][0].tab_stops,
+                    vec![PreviewTabStop {
+                        position_pt,
+                        alignment: "right",
+                        leader: "hyphen"
+                    }]
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
+    fn preview_source_tabs_stay_aligned_after_cached_toc_page_breaks() {
+        let xml = r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+          <w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>current heading</w:t></w:r></w:p>
+          <w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-3" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:br w:type="page"/><w:t>cached entry</w:t></w:r></w:p>
+          <w:p><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>
+          <w:p><w:pPr><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="7200"/></w:tabs></w:pPr><w:r><w:t>after toc</w:t><w:tab/><w:t>8</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let document = Document::open(&minimal_docx(xml)).unwrap();
+        let preview = document.model_with_layout_hints();
+        assert!(preview
+            .model
+            .blocks
+            .iter()
+            .any(|block| matches!(block, Block::PageBreak)));
+        let index = preview.model.blocks.iter().position(|block| matches!(block, Block::Paragraph(paragraph) if paragraph.text().starts_with("after toc"))).unwrap();
+        assert_eq!(
+            preview.paragraphs[index].tab_stops,
+            vec![PreviewTabStop {
+                position_pt: 360.0,
+                alignment: "right",
+                leader: "dot"
+            }]
+        );
+        assert!(preview.model.blocks.iter().any(|block| matches!(block, Block::Paragraph(paragraph) if paragraph.text().contains("cached entry"))));
+    }
+
+    #[cfg(any(feature = "docx", feature = "render"))]
+    #[test]
+    fn preview_legacy_running_tabs_survive_public_projection() {
+        for story in 0..6 {
+            for in_table in [false, true] {
+                let document =
+                    Document::open(&legacy_running_tabs_doc(story, in_table, true)).unwrap();
+                let preview = document.model_with_layout_hints();
+                assert_eq!(preview.running_paragraphs.len(), 1);
+                let running = &preview.running_paragraphs[0];
+                let surfaces = [
+                    &running.even_header,
+                    &running.header,
+                    &running.even_footer,
+                    &running.footer,
+                    &running.first_header,
+                    &running.first_footer,
+                ];
+                let layout = &surfaces[story][0];
+                let tabs = if in_table {
+                    &layout.table_cells[0][0][0].tab_stops
+                } else {
+                    &layout.tab_stops
+                };
+                assert_eq!(tabs.len(), 1, "story {story}, table {in_table}");
+                assert_eq!(tabs[0].position_pt, if in_table { 60.0 } else { 54.0 });
+                assert_eq!(
+                    tabs[0].alignment,
+                    if in_table { "right" } else { "decimal" }
+                );
+            }
+        }
+    }
+
     fn prm0(isprm: u8, value: u8) -> u16 {
         (u16::from(value) << 8) | (u16::from(isprm) << 1)
     }
@@ -14099,6 +14836,52 @@ mod tests {
         assert_ne!(exact_pdf, minimum_pdf);
         assert_eq!(exact_pdf, exact.to_pdf_with_fonts(&fonts));
         assert_eq!(minimum_pdf, minimum.to_pdf_with_fonts(&fonts));
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
+    fn preview_preserves_legacy_table_cell_spacing_and_pagination() {
+        for (source, expected) in [((0xFF9C, 0), ("exact", 5.0)), ((800, 0), ("atLeast", 40.0))] {
+            let doc = Document::open(&legacy_absolute_table_cell_spacing_doc(2, source)).unwrap();
+            let preview = doc.model_with_layout_hints();
+            let cells = &preview.paragraphs[0].table_cells[0][0];
+            assert_eq!(cells.len(), 2);
+            assert!(cells.iter().all(|p| p.line_spacing == Some(expected)));
+        }
+        let doc = Document::open(&legacy_table_cell_pagination_conversion_doc()).unwrap();
+        let preview = doc.model_with_layout_hints();
+        let table = preview.paragraphs.iter().find(|p| !p.table_cells.is_empty()).unwrap();
+        let cells = &table.table_cells[0][0];
+        assert!(cells[0].widow_control);
+        assert!(cells[1].keep_next);
+        assert!(cells[2].keep_lines);
+        assert!(!cells[3].widow_control);
+        assert!(cells[4].keep_next && cells[4].keep_lines);
+        assert_eq!(cells[4].line_spacing, Some(("exact", 5.0)));
+    }
+
+    #[cfg(feature = "docx")]
+    #[test]
+    fn preview_preserves_docx_nested_table_cell_layout() {
+        let doc = Document::open(&minimal_docx(
+            r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>
+                <w:tbl><w:tr><w:tc>
+                    <w:p><w:pPr><w:keepNext/><w:keepLines/><w:widowControl w:val="off"/><w:spacing w:line="560" w:lineRule="exact"/></w:pPr><w:r><w:t>outer</w:t></w:r></w:p>
+                    <w:tbl><w:tr><w:trPr><w:cantSplit/></w:trPr><w:tc><w:p><w:pPr><w:keepNext/><w:spacing w:line="400" w:lineRule="atLeast"/></w:pPr><w:r><w:t>inner</w:t></w:r></w:p></w:tc></w:tr></w:tbl>
+                    <w:p/>
+                </w:tc></w:tr></w:tbl>
+            </w:body></w:document>"#,
+        )).unwrap();
+        let preview = doc.model_with_layout_hints();
+        let cell = &preview.paragraphs[0].table_cells[0][0];
+        assert!(cell[0].keep_next && cell[0].keep_lines);
+        assert!(!cell[0].widow_control);
+        assert_eq!(cell[0].line_spacing, Some(("exact", 28.0)));
+        assert_eq!(cell[1].table_row_cant_split, [true]);
+        let nested = &cell[1].table_cells[0][0][0];
+        assert!(nested.keep_next);
+        assert_eq!(nested.line_spacing, Some(("atLeast", 20.0)));
+        assert!(cell[2].table_cells.is_empty());
     }
 
     #[cfg(feature = "docx")]

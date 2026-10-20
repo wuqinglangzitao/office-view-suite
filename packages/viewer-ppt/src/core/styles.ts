@@ -25,21 +25,22 @@ export const SHADOW_CSS = `
 .shape-geometry-layer { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .shape-geometry { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .shape-text { position: relative; z-index: 1; width: 100%; min-width: 0; box-sizing: border-box; overflow: hidden; }
-.shape p { margin: 0; font-size: calc(1.875cqw * var(--font-scale, 1)); line-height: var(--line-height, 1); white-space: pre-wrap; }
+.shape p, .tbl p { margin: 0; line-height: var(--line-height, 1); white-space: pre-wrap; }
+.shape p { font-size: calc(var(--default-font-size) * var(--font-scale, 1)); }
+.tbl p { font-size: inherit; }
 .shape-autofit-resize .shape-text { overflow: visible; }
 .picture { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; pointer-events: none; }
+.picture-clip { position: absolute; inset: 0; overflow: hidden; }
 .connector { overflow: visible; pointer-events: none; }
 
 .tbl {
   position: absolute;
   border-collapse: collapse;
   table-layout: fixed;
-  font-size: 1.458cqw;
   line-height: 1;
-  background: #fff;
+  transform-origin: center;
 }
-.tbl th, .tbl td { border: 1px solid #7d8790; padding: 0; white-space: pre-wrap; overflow: hidden; }
-.tbl th { background: #eef1f4; font-weight: 600; }
+.tbl th, .tbl td { border: none; padding: 0; white-space: pre-wrap; overflow: hidden; vertical-align: top; text-align: left; font-weight: normal; }
 
 @media print {
   .deck { gap: 12px; }

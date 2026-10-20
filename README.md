@@ -4,9 +4,9 @@
 
 文件由 Worker 与 Rust/WASM 在浏览器内解析，SDK 不上传文档内容。通过原生 DOM、Shadow DOM 和 Canvas 渲染，无需 iframe；支持多实例、取消加载和组件卸载时释放资源。
 
-当前提供源码及可本地打包的 ESM 包，**尚未发布到 npm**。项目自身的许可证尚未确定，使用和分发前请查看[许可状态](#项目许可状态)。
+当前提供源码及可本地打包的 ESM 包，**尚未发布到 npm**。项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。
 
-[快速开始](#快速开始) · [SDK 接入](#sdk-接入) · [开发与验证](#开发与验证) · [解析依赖与许可证](#解析依赖与许可证)
+[快速开始](#快速开始) · [SDK 接入](#sdk-接入) · [开发与验证](#开发与验证) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
 
 ## 支持格式
 
@@ -45,6 +45,7 @@ pnpm dev:sdk    # 构建 SDK 并启动多实例接入示例
 | Excel | `pnpm dev:excel` |
 | PowerPoint | `pnpm dev:ppt` |
 | PDF | `pnpm dev:pdf` |
+| Vue 2.7 接入示例 | `pnpm dev:vue2` |
 
 这些开发命令会先构建 SDK。修改 TypeScript 源码后，执行 `pnpm build:sdk` 刷新演示应用使用的产物，再刷新页面。修改 Rust、vendor、Cargo.lock、工具链声明或 WASM 构建脚本后，应先运行 `pnpm wasm`；SDK 构建会拒绝缺失、过期或被修改的 WASM 产物，并提示对应的重建命令。
 
@@ -86,7 +87,7 @@ input.addEventListener('change', () => {
 
 `bytes` 接受 `File` / `Blob`、`ArrayBuffer` 或 `Uint8Array`。同一实例再次 `open()` 会取消前一次加载；`clear()` 清空预览，`resize()` 可在隐藏容器重新显示后调用。React / Vue 等框架在挂载后创建实例，在卸载时调用 `viewer.destroy()`，并清理宿主自己注册的监听。
 
-Vite 可处理包内 Worker/WASM 资源；自行部署静态资源或使用 CDN 时，需要保留资源目录并配置 URL、CORS 与 CSP。完整 API、取消操作、原生 ESM 及部署示例见 [SDK 接入文档](docs/sdk.md)。
+Vite 生产构建可处理包内 Worker/WASM 资源；开发模式需将六个 SDK 包加入 `optimizeDeps.exclude`，保留资源相对路径。已实测的组件和配置见 [Vue 2 + Vite 接入](docs/vue2.md)。自行部署静态资源或使用 CDN 时，需要保留资源目录并配置 URL、CORS 与 CSP。完整 API、取消操作、原生 ESM 及部署示例见 [SDK 接入文档](docs/sdk.md)。
 
 ## 仓库结构
 
@@ -102,6 +103,7 @@ packages/
 third_party/pdfium/          # 上游预编译 PDFium、来源及许可材料
 apps/*-view/                 # 演示 UI 和 public/samples 样例
 fixtures/vanilla-vite/       # 从构建产物接入 SDK 的多实例示例
+fixtures/vue2-vite/          # Vue 2.7 Options API 组件与 Vite 接入验证
 tests/                      # SDK 回归测试
 scripts/                    # 构建、许可收集和安装包验证
 docs/sdk.md                 # 接入与部署说明
@@ -119,7 +121,11 @@ SDK 源码和引擎构建归属 `packages/`，构建不依赖演示应用目录�
 | `pnpm test` | 运行 Node.js SDK 回归测试 |
 | `pnpm test:rust` | 运行 Word、Excel、PPT crate 的原生单元测试 |
 | `pnpm test:packages` | 打包、核对许可材料，在独立临时项目安装并构建 |
+| `pnpm test:vue2` | 独立安装包的 Vue 2 开发/生产浏览器验证（需先运行 test:packages） |
 | `pnpm test:excel` | Excel 大表性能、工作表切换与布局回归（需要 Playwright） |
+| `pnpm test:word:display` | Word 展示数据、字段与布局回归（需要 Playwright） |
+| `pnpm test:word:charts` | Word SVG 图表、数值与降级数据展示回归（需要 Playwright） |
+| `pnpm test:ppt:display` | PPT 渐变、字号、表格、层级、变换与裁剪回归（需要 Playwright） |
 | `pnpm verify:pdfium` | 离线核对 PDFium 二进制、许可文本哈希和组件引用 |
 | `pnpm wasm` | 以锁定依赖构建所有 Rust/WASM，并记录输入与产物指纹 |
 
@@ -162,14 +168,18 @@ Word、Excel、PPT 使用 Rust/WASM 解析，再由本项目渲染器展示。PP
 
 更换 PDFium 二进制时须同步复核许可材料，不能只刷新哈希。样本文档、图片等业务素材的授权需单独确认。
 
-### 项目许可状态
+### 项目许可证
 
-仓库尚无根目录 `LICENSE`，根包及 SDK 包也未声明 `license` 字段。公开仓库和第三方依赖的宽松许可证，不等于本项目原创代码已经获得明确的开源使用或商业分发授权。
+项目原创代码采用 **Apache License 2.0**，完整条款见 [LICENSE](LICENSE)。根包、SDK 包、演示应用及本项目 Rust crate 均声明 `Apache-2.0`；每个 SDK 安装包包含 `dist/LICENSE`。
 
-确认原创代码版权归属后，可考虑 **Apache-2.0（建议）**、**MIT** 或 **MIT OR Apache-2.0**；这些方案尚未采用。Apache-2.0 包含明确的专利授权条款；选择 MIT 或双许可证也不能改变随包第三方组件的原许可义务。正式采用时应补充根目录许可证及各发布包的许可元数据，并保留第三方版权、许可、适用的 NOTICE 和修改声明。
+允许商业使用、修改和分发，也可集成到闭源应用，无须公开业务应用源码。分发时应提供许可证副本，保留适用的版权、署名和 NOTICE；分发修改后的文件时应明确标注改动。专利授权和其他条件以许可证正文为准。
+
+第三方依赖、内置源码及 PDFium 组件继续遵循各自许可证，具体材料见上文；业务样本文档、图片等素材不因本项目采用 Apache-2.0 而自动获得授权。
 
 ## 当前验证范围
 
 已验证 Chrome 下的 Vite 生产构建、原生 ESM、多实例、取消/替换加载、资源路径覆盖及销毁流程。SDK 需要支持 Worker、WebAssembly、Shadow DOM、ResizeObserver 的现代浏览器；PDF 懒渲染还使用 IntersectionObserver。
+
+Vue 2.7.16 + Vite 6.4.4 已通过开发/生产及两种资源部署方式的 44 项接入检查；包括四格式渲染、文件切换、组件卸载和 Worker 释放。可复制组件与验证步骤见 [Vue 2 接入文档](docs/vue2.md)。
 
 SSR、UMD 不在当前支持范围；Webpack/Rollup 独立接入及 Safari/Firefox 尚未完成实测。视觉回归用于验证 SDK 迁移前后的渲染一致性，不代表与 Office 原软件逐像素一致。

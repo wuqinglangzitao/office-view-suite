@@ -56,6 +56,8 @@ viewer.destroy();     // 组件卸载时调用，幂等
 
 React/Vue 等框架在挂载后创建实例，在卸载时调用 `destroy()` 即可。容器应具有可测量的宽度；SDK 创建自己的子元素及 Shadow Root，不重置容器的 class、style、原有子节点或 Shadow Root。Word 保持原页面尺寸，Excel 保留表格和选中的工作表，PPT/PDF 随容器宽度适配。
 
+Vue 2.7 + Vite 的可复制组件、依赖预打包配置和实测命令见 [Vue 2 接入](vue2.md)。
+
 ### 输入和结果
 
 `open({ bytes, name?, format?, signal? })` 支持 `.doc/.docx/.docm`、`.xlsx/.xlsm`、`.pptx`、`.pdf`。先检查文件内容，再选择解析器；例如 XLSX 误命名为 `.pdf` 仍按 Excel 打开。显式 `format` 与识别到的格式家族冲突时返回 `INVALID_SOURCE`。同一 OOXML 家族的 `.docx/.docm`、`.xlsx/.xlsm` 可由显式格式或文件名细化标记，因为宏格式不一定包含 VBA 条目。
@@ -65,6 +67,16 @@ React/Vue 等框架在挂载后创建实例，在卸载时调用 `destroy()` 即
 公共入口取得输入副本并预检一次，再将内部持有的 buffer 交给对应 Worker；不会 detach 调用者的 ArrayBuffer 或 Uint8Array。PDF 仅保留视口及约 300px 预加载区域内的页面位图，离屏保留布局占位，返回时重绘。没有 IntersectionObserver 时仍使用全量绘制降级路径；这项优化不限制 PDF 引擎自身的文档内存。
 
 SDK 复制文件数据，传给 Worker 后不会分离调用方的 ArrayBuffer。结果包含 `format`、`durationMs`、`warnings: Array<{code,message}>` 和格式相关的 `stats`；PPT/PDF 提供 `pageCount`，Excel 提供 `itemCount`。Word 分页渐进完成，当前不提供最终页数。`open()` 表示文档已解析并挂载；Word 后续分页和 PDF 可视页渲染仍可能继续。
+
+Word 正文按实际行高跨页拆分，保留列表编号、段落分页约束和分节起始规则；字体或无尺寸图片加载后会重新分页。布局在原始比例下计算，预览缩放不改变分页。`pnpm test:word` 验证段落、列表、分节、空白页和资源加载后的分页，浏览器测试需要通过 `PLAYWRIGHT_MODULE` 指定已安装的 Playwright 模块。
+
+Word 表格按来源样式显示单元格填充及各边的线型、颜色和粗细，不凭空添加实线或表头底色。没有可见边框的单元格显示灰色虚线辅助网格，便于识别结构；辅助网格不代表原文档边框，打印时隐藏。`pnpm test:word:tables` 用真实 DOCX 验证表格样式继承、条件填充、主题色、合并单元格和跨页重复表头，同样需要 `PLAYWRIGHT_MODULE`。
+
+Word 保留表格内列表、隐藏文字语义、段落底纹、大小写与 RTL 方向、图片旋转和正文浮动锚点。基础多栏、显式换栏、竖排节、允许拆分的普通表格行，以及 PAGE / NUMPAGES / SECTIONPAGES 字段参与浏览器分页。已被解析器识别的图表通过 SVG 展示常见二维类型；三维类型使用二维预览，其余类型保留数据表。散点/气泡图缺少原始 X 轴数据时会标注按序号预览。图表原始主题、坐标轴样式及未被解析器识别的图表语法仍有限制。
+
+PPT 保留渐变填充/线条/文字、物理字号、表格富文本和来源边框、绘制顺序、组合变换、图片裁剪、占位符文字继承、竖排和自动编号。有绘图缓存的 SmartArt 可按普通形状展示；原生图表及无可用缓存的 SmartArt 显示占位提示并返回 warning。内阴影、发光、反射、三维效果、部分预设几何及图片填充方式仍未完整还原。
+
+Word 预览仍依赖浏览器字体和排版；跨页合并表格、浮图环绕、同页连续分节、多栏平衡、字符网格和脚注等复杂布局尚不能保证与 Microsoft Word 逐页一致。表格艺术边框和图案底纹目前按基础线型、纯色近似显示。需要按原文件验收时，应使用同一文件由 Word 导出的 PDF 核对页数和各页内容；旧渲染器截图一致只证明迁移回归通过。
 
 ```ts
 const abort = new AbortController();
@@ -109,6 +121,8 @@ Excel 只挂载当前工作表，往返切换保留各表滚动位置。大表�
 ## Worker 和 WASM 部署
 
 默认由相对于包的 URL 加载资源。Vite 构建会识别并输出这些资源，支持应用部署在 `/office-view/` 等子路径下，不要求站点根目录存在 `/pdfium` 或 `/glue`。
+
+Vite 开发服务器应将六个 SDK 包加入 `optimizeDeps.exclude`，以免预打包移动 `import.meta.url` 后丢失相邻 Worker/WASM。独立安装包实测复现了此问题；完整配置见 [Vue 2 + Vite](vue2.md#安装与-vite-配置)。
 
 需要固定静态资源目录时，将四个适配器包的 `dist/assets/` 内容合并复制到应用公开目录：
 
@@ -179,15 +193,19 @@ workerBlobs.forEach(url => URL.revokeObjectURL(url));
 
 已验证 Chrome 中的 Vite 生产产物、原生 ESM、四种格式、子路径、跨域资源、自定义 Worker、双实例、连续打开、取消和销毁。需要现代浏览器的 Worker、WebAssembly、Shadow DOM、ResizeObserver；PDF 使用 Canvas，默认使用 IntersectionObserver 懒渲染。SSR 和 UMD 不在当前范围。Webpack/Rollup、Safari/Firefox 尚未完成实测，不作已验证承诺。
 
+Vue 2.7.16 + Vite 6.4.4 + `@vitejs/plugin-vue2` 2.3.4 已通过独立消费者实测：开发/生产及默认/固定资源目录四种组合，共 44 项检查，覆盖四格式渲染、prop 切换、错误处理、卸载和 Worker 清理。执行方式与边界见 [Vue 2 验证](vue2.md#重复验证)。
+
 复用现有 Rust 解析器和 DOM 渲染器，因此不承诺和 Microsoft Office 像素级一致；字体是否安装、Office 特性覆盖和原解析器限制仍然适用。
 
 浏览器回归复用已安装的 Playwright，不增加 SDK 运行时依赖：先运行 `pnpm test:packages`，再运行 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:browser`。截图和结果位于 `output/playwright/`。本次只准备本地安装包，未发布 npm。
 
-`pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，覆盖 6 个样本共 45 页／工作表，包括架构评审 PPT 的全部 39 页；另执行 9 组 Word 缩放与渐进分页检查。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。
+`pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，当前覆盖 6 个样本共 46 页／工作表，包括架构评审 PPT 的全部 39 页；另执行 9 组 Word 缩放与渐进分页检查。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。当前未通过的样例、预期界面调整及待核查项见[预览差异跟踪](known-preview-differences.md)。
 
 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:excel` 验证 Excel 懒挂载、滚动恢复、大表 DOM 上限、合并/冻结与缩放坐标。9 个合成 DTO 衡量渲染成本；3 个已签入 XLSX 和 1 个完整 OOXML 生成文件独立验证样式、合并、图片、富文本及公式缓存字段，加载/解析耗时另列。它从 `EXCEL_BASELINE_REF`（默认 `0ac7d51`）提取优化前 renderer，固定视口预热一次、测量五次，输出 `output/excel-preview-results.json`；为避免原版生成过量 DOM，超过安全阈值的旧版场景明确记为跳过，不声称对应旧版耗时。
 
 ## 第三方许可随包部署
+
+项目原创代码采用 [Apache-2.0](../LICENSE)。每个 SDK 安装包包含 `dist/LICENSE`，二次分发 SDK 或部署打包产物时应一并保留，并保留适用的版权、署名及修改声明。
 
 每个适配器的安装包带有 `dist/THIRD_PARTY_NOTICES.md` 和 `dist/licenses/`。PDF 适配器还包含与 `pdfium-lib 8046d` 二进制对应的许可材料：
 
@@ -200,4 +218,4 @@ PDFium 许可涵盖 PDFium 及内嵌组件、字体、Emscripten 运行库和启
 
 维护者运行 `pnpm verify:pdfium` 可离线校验源文件。PDF SDK 构建会校验实际输出的 JS/WASM 与许可文件，`pnpm test:packages` 还会核对 npm tarball 内的材料；文件缺失或哈希不符会失败。升级 PDFium 时先按构建证据文档重新追溯、收集许可，再更新 `provenance.json`，不能只改二进制或刷新哈希来跳过复核。
 
-这些材料仅覆盖所记录的第三方构建；项目自身的发布许可证仍应由仓库所有者确定，示例文件等业务素材另行授权。
+第三方材料仅覆盖所记录的第三方构建，各组件继续遵循其原许可证；示例文件等业务素材另行授权。

@@ -43,6 +43,7 @@ fn extract_bytes(data: &[u8], fc: usize) -> Option<Image> {
         height_px,
         rotation_degrees: None,
         floating_offset_emu: None,
+        drawing_layout: None,
     })
 }
 

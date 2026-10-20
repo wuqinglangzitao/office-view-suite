@@ -34,7 +34,7 @@ use crate::annotation::{
     page_ref_field_syntax, ref_field_syntax, toc_field_syntax, FieldKind,
 };
 use crate::model::{
-    Align, AuthoredContentControl, Block, Cell, CellMargins, CharProps, Chart, Color, DocGrid,
+    Align, AuthoredContentControl, Block, Cell, CellBorder, CellBorders, CellMargins, CharProps, Chart, Color, DocGrid,
     DocGridType, FieldRole, FieldUnsupportedReason, Image, Indent, LineSpacingHint, ListInfo,
     PageNumberFormat, PageSetup, PaginationHint, ParaProps, Paragraph, Row, Run, SectionBreakKind,
     SectionColumnHint, SectionColumnLayoutHints, SectionSetup, TabAlignment, TabStop, Table,
@@ -154,6 +154,8 @@ pub(crate) struct Ctx<'a> {
     pub extended_properties: &'a HashMap<String, String>,
     pub file_size_bytes: Option<usize>,
     pub preserve_note_local_fields: bool,
+    /// Preview keeps saved TOC runs, including their nested page references.
+    pub preserve_source_toc_cache: bool,
     pub ref_field_cursor: std::cell::RefCell<usize>,
     pub page_field_cursor: std::cell::RefCell<usize>,
     pub last_page_field_unsupported_display_format: std::cell::RefCell<Option<bool>>,
@@ -386,6 +388,8 @@ pub(crate) struct HeaderFooterRefs {
     pub footers: Vec<HeaderFooterRef>,
     pub header_distance_twips: Option<u32>,
     pub footer_distance_twips: Option<u32>,
+    /// Source section start behavior, including types outside the public model.
+    pub break_type: Option<&'static str>,
 }
 
 /// Scan `word/document.xml` for every `<w:headerReference>` / `<w:footerReference>`
@@ -481,11 +485,16 @@ fn read_hf_ref_section(r: &mut Xml<'_>) -> HeaderFooterRefs {
                     record_header_footer_distances(&mut refs, &e);
                     skip_subtree(r);
                 }
+                b"type" => {
+                    refs.break_type = preview_section_break_type(&e);
+                    skip_subtree(r);
+                }
                 _ => skip_subtree(r),
             },
             Ok(Event::Empty(e)) => match local(e.name().as_ref()) {
                 b"headerReference" | b"footerReference" => record_header_footer_ref(&mut refs, &e),
                 b"pgMar" => record_header_footer_distances(&mut refs, &e),
+                b"type" => refs.break_type = preview_section_break_type(&e),
                 _ => {}
             },
             Ok(Event::End(e)) if local(e.name().as_ref()) == b"sectPr" => break,
@@ -537,17 +546,33 @@ fn read_hf_ref_alternate_content_branch(
                     record_header_footer_distances(refs, &e);
                     skip_subtree(r);
                 }
+                b"type" => {
+                    refs.break_type = preview_section_break_type(&e);
+                    skip_subtree(r);
+                }
                 _ => skip_subtree(r),
             },
             Ok(Event::Empty(e)) => match local(e.name().as_ref()) {
                 b"headerReference" | b"footerReference" => record_header_footer_ref(refs, &e),
                 b"pgMar" => record_header_footer_distances(refs, &e),
+                b"type" => refs.break_type = preview_section_break_type(&e),
                 _ => {}
             },
             Ok(Event::End(e)) if local(e.name().as_ref()) == branch => break,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
+    }
+}
+
+fn preview_section_break_type(e: &BytesStart<'_>) -> Option<&'static str> {
+    match attr_local(e, b"val")?.as_str() {
+        "continuous" => Some("continuous"),
+        "nextColumn" => Some("nextColumn"),
+        "nextPage" => Some("nextPage"),
+        "evenPage" => Some("evenPage"),
+        "oddPage" => Some("oddPage"),
+        _ => None,
     }
 }
 
@@ -2365,6 +2390,9 @@ fn read_blocks_with_pagination(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> Bl
                     _ => skip_subtree(r),
                 }
             }
+            Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"p" => {
+                batch.extend(empty_paragraph_block_batch(ctx));
+            }
             Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -2442,6 +2470,9 @@ fn read_content_control_blocks_with_pagination(
                 }
                 _ => skip_subtree(r),
             },
+            Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"p" => {
+                batch.extend(empty_paragraph_block_batch(ctx));
+            }
             Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -2523,6 +2554,9 @@ fn read_content_control_blocks_alternate_content_branch(
                 }
                 _ => skip_subtree(r),
             },
+            Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"p" => {
+                batch.extend(empty_paragraph_block_batch(ctx));
+            }
             Ok(Event::End(e)) if local(e.name().as_ref()) == branch => break,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
@@ -2758,7 +2792,15 @@ struct ParagraphBlockData {
 fn read_paragraph_blocks_data(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> ParagraphBlockData {
     let (paragraph, charts, section, pagination, tab_stops, line_spacing) =
         read_paragraph(r, ctx, depth);
-    let mut split = if !charts.is_empty() && paragraph.runs.is_empty() {
+    let mut split = if section.is_some()
+        && paragraph.runs.is_empty()
+        && charts.is_empty()
+        && !paragraph.props.page_break_before
+    {
+        // The SectionBreak block already represents its carrier paragraph.
+        // Keep ordinary empty lines and independent page-break-before markers.
+        ParagraphBlockSplit::default()
+    } else if !charts.is_empty() && paragraph.runs.is_empty() {
         let blocks = charts.into_iter().map(Block::Chart).collect::<Vec<_>>();
         let column_break_offsets = vec![Vec::new(); blocks.len()];
         ParagraphBlockSplit {
@@ -2797,6 +2839,29 @@ fn read_paragraph_blocks_data(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> Par
 
 fn read_paragraph_block_batch(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> BlockBatch {
     let data = read_paragraph_blocks_data(r, ctx, depth);
+    paragraph_block_batch(data, ctx)
+}
+
+fn empty_paragraph_block_batch(ctx: &Ctx<'_>) -> BlockBatch {
+    let (paragraph, pagination, tab_stops, line_spacing) =
+        finalize_paragraph(Vec::new(), PPr::default(), ctx);
+    paragraph_block_batch(
+        ParagraphBlockData {
+            blocks: vec![Block::Paragraph(paragraph)],
+            pagination,
+            line_spacing,
+            tab_stops,
+            section_column_gap_pt: None,
+            section_column_layout: None,
+            section_column_separator: false,
+            section_column_rtl: false,
+            column_break_offsets: vec![Vec::new()],
+        },
+        ctx,
+    )
+}
+
+fn paragraph_block_batch(data: ParagraphBlockData, ctx: &Ctx<'_>) -> BlockBatch {
     ctx.capture_paragraph_blocks(&data);
     let pagination = data
         .blocks
@@ -2907,9 +2972,9 @@ fn split_page_breaks(paragraph: Paragraph) -> ParagraphBlockSplit {
         .any(|run| run.text.contains(PAGE_BREAK_MARKER) || run.text.contains(COLUMN_BREAK_MARKER))
     {
         let mut split = ParagraphBlockSplit::default();
-        if !paragraph.is_blank() || paragraph_has_field_runs(&paragraph) {
-            split.push(Block::Paragraph(paragraph), Vec::new());
-        }
+        // A source paragraph owns a line box even when it has no visible runs.
+        // Only empty fragments introduced by manual breaks are discarded below.
+        split.push(Block::Paragraph(paragraph), Vec::new());
         return split;
     }
 
@@ -3009,7 +3074,7 @@ impl ComplexFieldTracker {
     fn end(&mut self, ctx: &Ctx<'_>, index: usize) {
         if self.phase.is_some() {
             let instruction = normalized_field_instruction(&self.instruction);
-            if !instruction.is_empty() {
+            if !instruction.is_empty() && !preserve_source_toc_field(&instruction, ctx) {
                 let current_result = self.result_text.as_str();
                 let text = computed_simple_field_result(&instruction, ctx, current_result);
                 let preserve_instruction =
@@ -3141,7 +3206,10 @@ fn computed_simple_field_run(instruction: String, text: String, preserve_instruc
 }
 
 fn preserves_computed_field_instruction(instruction: &str, ctx: &Ctx<'_>) -> bool {
-    preserves_context_free_computed_field_instruction(instruction)
+    (ctx.preserve_source_toc_cache && matches!(
+        instruction.split_whitespace().next().map(str::to_ascii_uppercase).as_deref(),
+        Some("PAGE" | "NUMPAGES" | "SECTIONPAGES")
+    )) || preserves_context_free_computed_field_instruction(instruction)
         || super::fields::computed_preserved_document_info_result(
             instruction,
             ctx.core_properties,
@@ -4826,6 +4894,11 @@ fn read_drawing(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> (Option<Image>, S
     // Start from the caller's structural depth (not 0) so the recursion budget is
     // continuous across the drawing/text-box boundary.
     walk_drawing(r, ctx, &mut state, depth);
+    if let (Some(image), Some(extent)) = (state.image.as_mut(), state.extent) {
+        let layout = image.drawing_layout.get_or_insert_with(Default::default);
+        layout.width_px = emu_to_px(extent.cx);
+        layout.height_px = emu_to_px(extent.cy);
+    }
     if let Some(mut chart) = state.chart.take() {
         chart.alt = state.alt.take();
         if let Some(extent) = state.extent {
@@ -4862,10 +4935,10 @@ fn walk_drawing(r: &mut Xml<'_>, ctx: &Ctx<'_>, state: &mut DrawingReadState, de
                     state.anchor = previous_anchor;
                 }
                 b"positionH" => {
-                    state.anchor.horizontal_page_offset_emu = read_page_position_offset(r, &e);
+                    state.anchor.horizontal = read_drawing_position_offset(r, &e, true);
                 }
                 b"positionV" => {
-                    state.anchor.vertical_page_offset_emu = read_page_position_offset(r, &e);
+                    state.anchor.vertical = read_drawing_position_offset(r, &e, false);
                 }
                 b"txbxContent" => {
                     if depth < MAX_DEPTH {
@@ -4937,8 +5010,8 @@ fn apply_drawing_alt(img: &mut Option<Image>, alt: &Option<String>) {
 #[derive(Debug, Clone, Copy, Default)]
 struct DrawingAnchorOffset {
     active: bool,
-    horizontal_page_offset_emu: Option<i64>,
-    vertical_page_offset_emu: Option<i64>,
+    horizontal: Option<(&'static str, i64)>,
+    vertical: Option<(&'static str, i64)>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4972,14 +5045,21 @@ fn drawing_chart(e: &BytesStart<'_>, ctx: &Ctx<'_>) -> Option<Chart> {
     ctx.charts.get(&id).cloned()
 }
 
-fn read_page_position_offset(r: &mut Xml<'_>, start: &BytesStart<'_>) -> Option<i64> {
-    let page_relative =
-        attr_local_trimmed(start, b"relativeFrom").is_some_and(|value| value == "page");
+fn read_drawing_position_offset(
+    r: &mut Xml<'_>, start: &BytesStart<'_>, horizontal: bool,
+) -> Option<(&'static str, i64)> {
+    let reference = match attr_local_trimmed(start, b"relativeFrom").as_deref() {
+        Some("page") => Some("page"),
+        Some("margin") => Some("margin"),
+        Some("column") if horizontal => Some("column"),
+        Some("paragraph") if !horizontal => Some("paragraph"),
+        _ => None,
+    };
     let mut offset = None;
     loop {
         match r.read_event() {
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"posOffset" => {
-                if page_relative {
+                if reference.is_some() {
                     offset = read_i64_text(r);
                 } else {
                     skip_subtree(r);
@@ -4995,19 +5075,24 @@ fn read_page_position_offset(r: &mut Xml<'_>, start: &BytesStart<'_>) -> Option<
             _ => {}
         }
     }
-    offset
+    reference.zip(offset)
 }
 
 fn apply_floating_anchor_offset(img: &mut Option<Image>, anchor: &DrawingAnchorOffset) {
     if !anchor.active {
         return;
     }
-    if let (Some(image), Some(x), Some(y)) = (
+    if let (Some(image), Some((horizontal_from, x)), Some((vertical_from, y))) = (
         img.as_mut(),
-        anchor.horizontal_page_offset_emu,
-        anchor.vertical_page_offset_emu,
+        anchor.horizontal,
+        anchor.vertical,
     ) {
-        image.floating_offset_emu = Some((x, y));
+        if horizontal_from == "page" && vertical_from == "page" {
+            image.floating_offset_emu = Some((x, y));
+        }
+        image.drawing_layout.get_or_insert_with(Default::default).anchor = Some(crate::model::ImageAnchor {
+            horizontal_from, vertical_from, x_emu: x, y_emu: y,
+        });
     }
 }
 
@@ -5139,6 +5224,9 @@ fn read_fldsimple(
         depth + 1,
         preserve_instruction,
     );
+    if preserve_source_toc_field(&instruction, ctx) {
+        return runs;
+    }
     if url.is_none() && !instruction.is_empty() {
         let current_result = runs.iter().map(|run| run.text.as_str()).collect::<String>();
         let computed = computed_simple_field_result(&instruction, ctx, &current_result);
@@ -5682,11 +5770,22 @@ fn unsupported_merge_field_reason_hint(instruction: &str) -> Option<FieldUnsuppo
     (!merge_field_syntax(instruction)).then_some(FieldUnsupportedReason::UnsupportedSwitch)
 }
 
+fn preserve_source_toc_field(instruction: &str, ctx: &Ctx<'_>) -> bool {
+    ctx.preserve_source_toc_cache
+        && matches!(
+            FieldKind::from_instruction(instruction),
+            FieldKind::Toc | FieldKind::PageRef
+        )
+}
+
 fn computed_simple_field_result(
     instruction: &str,
     ctx: &Ctx<'_>,
     current_result: &str,
 ) -> Option<String> {
+    if preserve_source_toc_field(instruction, ctx) {
+        return None;
+    }
     ctx.last_formula_field_used_table_context.set(false);
     let (ref_position, note_ref_position) = ref_field_positions(instruction, ctx);
     let ref_result = {
@@ -6384,6 +6483,7 @@ struct CellRaw {
     width_pct_declared: bool,
     margins: CellMarginSpec,
     style_regions: Option<CellStyleRegionSpec>,
+    borders: CellBorders,
 }
 
 struct RowRaw {
@@ -6395,8 +6495,11 @@ struct RowRaw {
 struct RowProps {
     header: Option<bool>,
     cant_split: Option<bool>,
+    min_height_pt: Option<f32>,
+    height_declared: bool,
     style_regions: Option<TableRowStyleRegions>,
     cell_margins: Option<CellMarginSpec>,
+    borders: CellBorders,
 }
 
 impl RowProps {
@@ -6407,10 +6510,28 @@ impl RowProps {
         if other.cant_split.is_some() {
             self.cant_split = other.cant_split;
         }
+        if other.height_declared {
+            self.min_height_pt = other.min_height_pt;
+            self.height_declared = true;
+        }
         if other.style_regions.is_some() {
             self.style_regions = other.style_regions;
         }
         self.overlay_cell_margins(other.cell_margins);
+        self.borders.overlay(other.borders);
+    }
+
+    fn read_height(&mut self, e: &BytesStart<'_>) {
+        // trHeight defaults to auto when hRule is absent; val then has no effect.
+        // Exact heights need clipping semantics and cannot be modeled as minima.
+        self.height_declared = true;
+        self.min_height_pt = if attr_local_trimmed(e, b"hRule").as_deref() == Some("atLeast") {
+            attr_local(e, b"val")
+                .and_then(|value| twips_to_pt(&value))
+                .filter(|height| *height > 0.0)
+        } else {
+            None
+        };
     }
 
     fn overlay_cell_margins(&mut self, other: Option<CellMarginSpec>) {
@@ -6544,6 +6665,11 @@ fn read_table(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> (Table, TablePagina
     props.width_pct = props.width_pct.or(style_geometry.width_pct);
     props.indent_twips = props.indent_twips.or(style_geometry.indent_twips);
     props.align = props.align.or(style_geometry.align);
+    let mut inherited_borders = ctx.styles.table_borders(props.style_id.as_deref())
+        .map(|borders| borders.6).unwrap_or_default();
+    props.direct_preview_borders = props.preview_borders;
+    inherited_borders.overlay(props.preview_borders);
+    props.preview_borders = inherited_borders;
     // A table style's borders apply unless the table declares its own.
     if !props.borders_declared {
         if let Some(borders) = ctx.styles.table_borders(props.style_id.as_deref()) {
@@ -6726,6 +6852,8 @@ struct TableProps {
     border_sizes: TableBorderSizes,
     border_style: Option<TableBorderStyle>,
     border_styles: TableBorderStyles,
+    preview_borders: CellBorders,
+    direct_preview_borders: CellBorders,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -6938,6 +7066,7 @@ fn read_tblpr(r: &mut Xml<'_>) -> TableProps {
                 props.border_sizes = borders.3;
                 props.border_style = borders.4;
                 props.border_styles = borders.5;
+                props.preview_borders = borders.6;
             }
             Ok(Event::Start(e)) => {
                 apply_tblpr_child(&mut props, &e);
@@ -7015,6 +7144,7 @@ fn read_tblpr_alternate_content_branch(
                 props.border_sizes = borders.3;
                 props.border_style = borders.4;
                 props.border_styles = borders.5;
+                props.preview_borders = borders.6;
             }
             Ok(Event::Start(e)) => {
                 apply_tblpr_child(props, &e);
@@ -7085,6 +7215,7 @@ impl TableStyleCellDefaults {
             width_pct_declared: false,
             margins: CellMarginSpec::default(),
             style_regions: None,
+            borders: CellBorders::default(),
         };
         apply_tcpr_child(&mut t, e);
         self.overlay(Self {
@@ -7157,18 +7288,10 @@ pub(crate) type TableBorderTuple = (
     TableBorderSizes,
     Option<TableBorderStyle>,
     TableBorderStyles,
+    CellBorders,
 );
 
-pub(crate) fn read_tbl_borders(
-    r: &mut Xml<'_>,
-) -> (
-    Option<Color>,
-    TableBorderColors,
-    Option<u16>,
-    TableBorderSizes,
-    Option<TableBorderStyle>,
-    TableBorderStyles,
-) {
+pub(crate) fn read_tbl_borders(r: &mut Xml<'_>) -> TableBorderTuple {
     let mut borders = TableBorderProps::default();
     loop {
         match r.read_event() {
@@ -7199,6 +7322,7 @@ struct TableBorderProps {
     styles: TableBorderStyles,
     style_seen: bool,
     style_consistent: bool,
+    preview: CellBorders,
 }
 
 impl Default for TableBorderProps {
@@ -7216,12 +7340,14 @@ impl Default for TableBorderProps {
             styles: TableBorderStyles::default(),
             style_seen: false,
             style_consistent: true,
+            preview: CellBorders::default(),
         }
     }
 }
 
 impl TableBorderProps {
     fn record(&mut self, e: &BytesStart<'_>) {
+        record_preview_border(&mut self.preview, e);
         let Some(side) = table_border_side(e) else {
             return;
         };
@@ -7255,16 +7381,7 @@ impl TableBorderProps {
         }
     }
 
-    fn finish(
-        self,
-    ) -> (
-        Option<Color>,
-        TableBorderColors,
-        Option<u16>,
-        TableBorderSizes,
-        Option<TableBorderStyle>,
-        TableBorderStyles,
-    ) {
+    fn finish(self) -> TableBorderTuple {
         let uniform_color = if self.color_seen && self.color_consistent {
             self.color
         } else {
@@ -7287,6 +7404,7 @@ impl TableBorderProps {
             self.sizes,
             uniform_style,
             self.styles,
+            self.preview,
         )
     }
 }
@@ -7345,6 +7463,52 @@ fn table_border_side(e: &BytesStart<'_>) -> Option<TableBorderSide> {
     }
 }
 
+fn record_preview_border(borders: &mut CellBorders, e: &BytesStart<'_>) {
+    let edge = match local(e.name().as_ref()) {
+        b"top" => &mut borders.top,
+        b"right" => &mut borders.right,
+        b"bottom" => &mut borders.bottom,
+        b"left" => &mut borders.left,
+        b"insideH" => &mut borders.inside_h,
+        b"insideV" => &mut borders.inside_v,
+        b"start" => &mut borders.start,
+        b"end" => &mut borders.end,
+        _ => return,
+    };
+    let style = match attr_local_trimmed(e, b"val").as_deref() {
+        None | Some("nil" | "none") => "none",
+        Some("dotted") => "dotted",
+        Some("dashed" | "dashSmallGap" | "dotDash" | "dotDotDash") => "dashed",
+        Some("double" | "triple" | "thinThickSmallGap" | "thickThinSmallGap"
+            | "thinThickMediumGap" | "thickThinMediumGap" | "thinThickLargeGap"
+            | "thickThinLargeGap") => "double",
+        _ => "solid",
+    };
+    *edge = Some(CellBorder {
+        style,
+        color: attr_local(e, b"color").and_then(|value| parse_rgb_hex_color(&value)),
+        // An omitted width must not become an invented half-point stroke.
+        width_eighths: attr_u16(e, b"sz").unwrap_or(0),
+    });
+}
+
+pub(crate) fn read_cell_borders(r: &mut Xml<'_>, end: &[u8]) -> CellBorders {
+    let mut borders = CellBorders::default();
+    loop {
+        match r.read_event() {
+            Ok(Event::Start(e)) => {
+                record_preview_border(&mut borders, &e);
+                skip_subtree(r);
+            }
+            Ok(Event::Empty(e)) => record_preview_border(&mut borders, &e),
+            Ok(Event::End(e)) if local(e.name().as_ref()) == end => break,
+            Ok(Event::Eof) | Err(_) => break,
+            _ => {}
+        }
+    }
+    borders
+}
+
 /// Read a `<w:tr>` and its direct row properties.
 fn read_row(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> RowRaw {
     let mut cells = Vec::new();
@@ -7353,8 +7517,7 @@ fn read_row(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> RowRaw {
         match r.read_event() {
             Ok(Event::Start(e)) => match local(e.name().as_ref()) {
                 b"tblPrEx" => {
-                    let margins = read_tblprex_cell_margins(r, depth);
-                    props.overlay_cell_margins(margins);
+                    props.merge(read_tblprex_properties(r, depth));
                 }
                 b"trPr" => props.merge(read_trpr(r)),
                 b"tc" => cells.push(read_cell(r, ctx, depth + 1)),
@@ -7433,8 +7596,7 @@ fn read_row_alternate_content_branch_cells(
             Ok(Event::Start(e)) => match local(e.name().as_ref()) {
                 b"tblPrEx" => {
                     let mut merged = props.unwrap_or_default();
-                    let margins = read_tblprex_cell_margins(r, depth);
-                    merged.overlay_cell_margins(margins);
+                    merged.merge(read_tblprex_properties(r, depth));
                     props = Some(merged);
                 }
                 b"trPr" => {
@@ -7464,36 +7626,39 @@ fn read_row_alternate_content_branch_cells(
     (cells, props)
 }
 
-fn read_tblprex_cell_margins(r: &mut Xml<'_>, depth: u32) -> Option<CellMarginSpec> {
+fn read_tblprex_properties(r: &mut Xml<'_>, depth: u32) -> RowProps {
     if depth > MAX_DEPTH {
         skip_subtree(r);
-        return None;
+        return RowProps::default();
     }
-    let mut margins = None;
+    let mut props = RowProps::default();
     loop {
         match r.read_event() {
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tblPrExChange" => {
                 skip_subtree(r);
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"AlternateContent" => {
-                read_tblprex_alternate_content(r, &mut margins, depth + 1);
+                read_tblprex_alternate_content(r, &mut props, depth + 1);
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tblCellMar" => {
                 overlay_declared_cell_margins(
-                    &mut margins,
+                    &mut props.cell_margins,
                     read_cell_margins(r, b"tblCellMar", depth + 1),
                 );
             }
+            Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tblBorders" => {
+                props.borders.overlay(read_cell_borders(r, b"tblBorders"));
+            }
             Ok(Event::Start(_)) => skip_subtree(r),
             Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"tblCellMar" => {
-                overlay_declared_cell_margins(&mut margins, CellMarginSpec::default());
+                overlay_declared_cell_margins(&mut props.cell_margins, CellMarginSpec::default());
             }
             Ok(Event::End(e)) if local(e.name().as_ref()) == b"tblPrEx" => break,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
     }
-    margins
+    props
 }
 
 fn overlay_declared_cell_margins(
@@ -7509,7 +7674,7 @@ fn overlay_declared_cell_margins(
 
 fn read_tblprex_alternate_content(
     r: &mut Xml<'_>,
-    margins: &mut Option<CellMarginSpec>,
+    props: &mut RowProps,
     depth: u32,
 ) {
     if depth > MAX_DEPTH {
@@ -7525,7 +7690,7 @@ fn read_tblprex_alternate_content(
                 match name {
                     b"Choice" | b"Fallback" if !took => {
                         took = true;
-                        read_tblprex_alternate_content_branch(r, margins, name, depth + 1);
+                        read_tblprex_alternate_content_branch(r, props, name, depth + 1);
                     }
                     _ => skip_subtree(r),
                 }
@@ -7544,7 +7709,7 @@ fn read_tblprex_alternate_content(
 
 fn read_tblprex_alternate_content_branch(
     r: &mut Xml<'_>,
-    margins: &mut Option<CellMarginSpec>,
+    props: &mut RowProps,
     branch: &[u8],
     depth: u32,
 ) {
@@ -7558,17 +7723,20 @@ fn read_tblprex_alternate_content_branch(
                 skip_subtree(r);
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"AlternateContent" => {
-                read_tblprex_alternate_content(r, margins, depth + 1);
+                read_tblprex_alternate_content(r, props, depth + 1);
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tblCellMar" => {
                 overlay_declared_cell_margins(
-                    margins,
+                    &mut props.cell_margins,
                     read_cell_margins(r, b"tblCellMar", depth + 1),
                 );
             }
+            Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tblBorders" => {
+                props.borders.overlay(read_cell_borders(r, b"tblBorders"));
+            }
             Ok(Event::Start(_)) => skip_subtree(r),
             Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"tblCellMar" => {
-                overlay_declared_cell_margins(margins, CellMarginSpec::default());
+                overlay_declared_cell_margins(&mut props.cell_margins, CellMarginSpec::default());
             }
             Ok(Event::End(e)) if local(e.name().as_ref()) == branch => break,
             Ok(Event::Eof) | Err(_) => break,
@@ -7702,7 +7870,7 @@ fn read_cell_style_regions(e: &BytesStart<'_>) -> Option<CellStyleRegionSpec> {
     }))
 }
 
-/// Read direct `<w:trPr>` pagination properties.
+/// Read direct `<w:trPr>` layout and pagination properties.
 fn read_trpr(r: &mut Xml<'_>) -> RowProps {
     let mut props = RowProps::default();
     loop {
@@ -7724,6 +7892,11 @@ fn read_trpr(r: &mut Xml<'_>) -> RowProps {
                 if local(e.name().as_ref()) == b"cantSplit" =>
             {
                 props.cant_split = Some(toggle_on(attr_local(&e, b"val")));
+            }
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if local(e.name().as_ref()) == b"trHeight" =>
+            {
+                props.read_height(&e);
             }
             Ok(Event::Start(e)) | Ok(Event::Empty(e))
                 if local(e.name().as_ref()) == b"cnfStyle" =>
@@ -7787,6 +7960,11 @@ fn read_trpr_alternate_content_branch(r: &mut Xml<'_>, branch: &[u8]) -> RowProp
                 props.cant_split = Some(toggle_on(attr_local(&e, b"val")));
             }
             Ok(Event::Start(e)) | Ok(Event::Empty(e))
+                if local(e.name().as_ref()) == b"trHeight" =>
+            {
+                props.read_height(&e);
+            }
+            Ok(Event::Start(e)) | Ok(Event::Empty(e))
                 if local(e.name().as_ref()) == b"cnfStyle" =>
             {
                 if let Some(regions) = read_row_style_regions(&e) {
@@ -7822,6 +8000,7 @@ fn read_cell(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> CellRaw {
             width_pct_declared: false,
             margins: CellMarginSpec::default(),
             style_regions: None,
+            borders: CellBorders::default(),
         };
     }
     let mut blocks = Vec::new();
@@ -7876,6 +8055,16 @@ fn read_cell(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> CellRaw {
                     ),
                 _ => skip_subtree(r),
             },
+            Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"p" => {
+                empty_paragraph_block_batch(ctx).append_to(
+                    &mut blocks,
+                    &mut pagination,
+                    &mut line_spacing,
+                    &mut nested_tables,
+                    &mut tab_stops,
+                    &mut column_break_offsets,
+                );
+            }
             Ok(Event::End(_)) | Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -7891,6 +8080,7 @@ fn read_cell(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> CellRaw {
         width_pct_declared: false,
         margins: CellMarginSpec::default(),
         style_regions: None,
+        borders: CellBorders::default(),
     });
     CellRaw {
         blocks,
@@ -7909,6 +8099,7 @@ fn read_cell(r: &mut Xml<'_>, ctx: &Ctx<'_>, depth: u32) -> CellRaw {
         width_pct_declared: tc.width_pct_declared,
         margins: tc.margins,
         style_regions: tc.style_regions,
+        borders: tc.borders,
     }
 }
 
@@ -7993,6 +8184,9 @@ fn read_cell_alternate_content_branch(
                 }
                 _ => skip_subtree(r),
             },
+            Ok(Event::Empty(e)) if local(e.name().as_ref()) == b"p" => {
+                batch.extend(empty_paragraph_block_batch(ctx));
+            }
             Ok(Event::End(e)) if local(e.name().as_ref()) == branch => break,
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
@@ -8013,6 +8207,7 @@ struct TcPr {
     width_pct_declared: bool,
     margins: CellMarginSpec,
     style_regions: Option<CellStyleRegionSpec>,
+    borders: CellBorders,
 }
 
 /// Read `<w:tcPr>` → gridSpan / vMerge / shading / vAlign / width.
@@ -8028,6 +8223,7 @@ fn read_tcpr(r: &mut Xml<'_>) -> TcPr {
         width_pct_declared: false,
         margins: CellMarginSpec::default(),
         style_regions: None,
+        borders: CellBorders::default(),
     };
     loop {
         match r.read_event() {
@@ -8039,6 +8235,9 @@ fn read_tcpr(r: &mut Xml<'_>) -> TcPr {
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tcMar" => {
                 t.margins.overlay(read_cell_margins(r, b"tcMar", 0));
+            }
+            Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tcBorders" => {
+                t.borders.overlay(read_cell_borders(r, b"tcBorders"));
             }
             Ok(Event::Start(e)) => {
                 apply_tcpr_child(&mut t, &e);
@@ -8096,6 +8295,9 @@ fn read_tcpr_alternate_content_branch(r: &mut Xml<'_>, t: &mut TcPr, branch: &[u
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tcMar" => {
                 t.margins.overlay(read_cell_margins(r, b"tcMar", depth + 1));
+            }
+            Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tcBorders" => {
+                t.borders.overlay(read_cell_borders(r, b"tcBorders"));
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"AlternateContent" => {
                 read_tcpr_alternate_content(r, t, depth + 1);
@@ -8332,6 +8534,11 @@ fn build_table(
         .iter()
         .take_while(|row| row.props.header.unwrap_or(false))
         .count();
+    let row_borders = raw_rows
+        .iter()
+        .map(|row| row.props.borders.physical(props.bidi_visual))
+        .collect::<Vec<_>>();
+    let row_min_heights_pt = raw_rows.iter().map(|row| row.props.min_height_pt).collect();
 
     struct Placed {
         blocks: Vec<Block>,
@@ -8355,6 +8562,7 @@ fn build_table(
         row_cell_margins: Option<CellMarginSpec>,
         margins: CellMarginSpec,
         style_regions: Option<CellStyleRegionSpec>,
+        borders: CellBorders,
     }
 
     let mut grid: Vec<Vec<Placed>> = Vec::with_capacity(raw_rows.len());
@@ -8388,6 +8596,7 @@ fn build_table(
                 row_cell_margins,
                 margins: c.margins,
                 style_regions: c.style_regions,
+                borders: c.borders,
             });
             col += cs as usize;
         }
@@ -8406,6 +8615,9 @@ fn build_table(
                 VMerge::Continue => {
                     if let Some(&(rr, oo)) = open.get(&col) {
                         grid[rr][oo].row_span = grid[rr][oo].row_span.saturating_add(1);
+                        // The merged area's final physical bottom comes from
+                        // its last continuation, not a discarded internal edge.
+                        grid[rr][oo].borders.bottom = grid[r][o].borders.bottom;
                         grid[r][o].dropped = true;
                     } else {
                         // Continuation with no open restart → recover as its own
@@ -8421,6 +8633,7 @@ fn build_table(
     }
 
     let row_count = grid.len();
+    let table_style_row_regions = row_regions.clone();
     let cell_margin_defaults_active = !props.cell_margins.is_empty()
         || grid.iter().enumerate().any(|(row_index, row)| {
             let row_regions = row_regions.get(row_index).copied().unwrap_or_default();
@@ -8472,6 +8685,73 @@ fn build_table(
                 props.bidi_visual,
             );
             let style_presentation = style_cell_props.presentation_for_regions(regions);
+            let table_borders = props.preview_borders.physical(props.bidi_visual);
+            let mut borders = CellBorders {
+                top: if row_index == 0 { table_borders.top } else { table_borders.inside_h },
+                bottom: if row_index + p.row_span as usize >= row_count { table_borders.bottom } else { table_borders.inside_h },
+                left: if p.col == 0 { table_borders.left } else { table_borders.inside_v },
+                right: if p.col + p.col_span as usize >= model_grid_cols { table_borders.right } else { table_borders.inside_v },
+                ..CellBorders::default()
+            };
+            let mut style_borders = style_presentation.borders.physical(props.bidi_visual);
+            // An inside border belongs between two cells of the styled region.
+            // In particular, firstRow/lastRow insideH must not create a line at
+            // that region's outer boundary, and merged cells have no inner edge.
+            let neighbor_borders = |row: usize, col: usize| {
+                let neighbor_regions = effective_cell_style_regions(
+                    None, table_look, table_style_row_regions.get(row).copied().unwrap_or_default(), row, row_count,
+                    col, 1, model_grid_cols, col_band_size, props.bidi_visual,
+                );
+                style_cell_props.presentation_for_regions(neighbor_regions).borders.physical(props.bidi_visual)
+            };
+            if let Some(inside) = style_borders.inside_v {
+                if p.col > 0 && neighbor_borders(row_index, p.col - 1).inside_v == Some(inside) {
+                    style_borders.left = style_borders.left.or(Some(inside));
+                }
+                let after = p.col + p.col_span as usize;
+                if after < model_grid_cols && neighbor_borders(row_index, after).inside_v == Some(inside) {
+                    style_borders.right = style_borders.right.or(Some(inside));
+                }
+            }
+            if let Some(inside) = style_borders.inside_h {
+                if row_index > 0 && neighbor_borders(row_index - 1, p.col).inside_h == Some(inside) {
+                    style_borders.top = style_borders.top.or(Some(inside));
+                }
+                let after = row_index + p.row_span as usize;
+                if after < row_count && neighbor_borders(after, p.col).inside_h == Some(inside) {
+                    style_borders.bottom = style_borders.bottom.or(Some(inside));
+                }
+            }
+            borders.overlay(style_borders);
+            // Direct table formatting follows table-style conditions; direct
+            // cell formatting remains the final override.
+            let direct = props.direct_preview_borders.physical(props.bidi_visual);
+            borders.overlay(CellBorders {
+                top: if row_index == 0 { direct.top } else { direct.inside_h },
+                bottom: if row_index + p.row_span as usize >= row_count { direct.bottom } else { direct.inside_h },
+                left: if p.col == 0 { direct.left } else { direct.inside_v },
+                right: if p.col + p.col_span as usize >= model_grid_cols { direct.right } else { direct.inside_v },
+                ..CellBorders::default()
+            });
+            // tblPrEx borders describe the parent row's edges, including rows
+            // in the table interior, and override table declarations.
+            // A vertically merged cell's final edge belongs to its last row.
+            let row = row_borders[row_index];
+            let end = row_index + p.row_span as usize;
+            let last_row = row_borders[end - 1];
+            borders.overlay(CellBorders {
+                top: row.top.or(if row_index > 0 { row.inside_h } else { None }),
+                bottom: last_row.bottom.or(if end < row_count { last_row.inside_h } else { None }),
+                left: if p.col == 0 { row.left } else { row.inside_v },
+                right: if p.col + p.col_span as usize >= model_grid_cols { row.right } else { row.inside_v },
+                ..CellBorders::default()
+            });
+            borders.overlay(p.borders.physical(props.bidi_visual));
+            let no_border = Some(CellBorder { style: "none", color: None, width_eighths: 0 });
+            borders.top = borders.top.or(no_border);
+            borders.right = borders.right.or(no_border);
+            borders.bottom = borders.bottom.or(no_border);
+            borders.left = borders.left.or(no_border);
             cell_pagination.push(p.pagination);
             cell_line_spacing.push(p.line_spacing);
             cell_column_breaks.push(p.column_break_offsets);
@@ -8482,6 +8762,7 @@ fn build_table(
                 col_span: p.col_span,
                 row_span: p.row_span,
                 is_header: p.is_header,
+                borders,
                 // The restart row's resolved style presentation fills only
                 // properties the surviving cell left undeclared.
                 shading: if p.shading_declared {
@@ -8522,6 +8803,7 @@ fn build_table(
             col_widths_pct: normalize_table_grid_widths(&grid_widths, model_grid_cols),
             bidi_visual: props.bidi_visual,
             fixed_layout: props.fixed_layout,
+            row_min_heights_pt,
             indent_twips: props.indent_twips,
             align: props.align,
             width_pct: props.width_pct,
@@ -8571,6 +8853,193 @@ mod tests {
 
     fn parse(xml: &str) -> Vec<Block> {
         parse_with_media(xml, HashMap::new())
+    }
+
+    #[test]
+    fn preview_cell_borders_preserve_styles_clears_and_merged_outer_edges() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblBorders>
+            <w:top w:val="single" w:sz="4" w:color="000000"/>
+            <w:insideH w:val="dashed" w:sz="8" w:color="334455"/>
+            <w:bottom w:val="single" w:sz="4"/>
+            </w:tblBorders></w:tblPr>
+            <w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/><w:tcBorders>
+            <w:top w:val="nil"/><w:left w:val="dotted" w:sz="12" w:color="112233"/>
+            <w:bottom w:val="double" w:sz="16"/></w:tcBorders></w:tcPr><w:p/></w:tc>
+            <w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tc><w:tcPr><w:vMerge/><w:tcBorders><w:bottom w:val="dashed" w:sz="24" w:color="445566"/></w:tcBorders></w:tcPr><w:p/></w:tc>
+            <w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        let cell = &table.rows[0].cells[0];
+        assert_eq!(cell.row_span, 2);
+        assert_eq!(cell.borders.top.unwrap().style, "none");
+        assert_eq!(cell.borders.left.unwrap().style, "dotted");
+        assert_eq!(cell.borders.left.unwrap().color, Some(Color::rgb(0x11, 0x22, 0x33)));
+        assert_eq!(cell.borders.bottom.unwrap().style, "dashed");
+        assert_eq!(cell.borders.bottom.unwrap().width_eighths, 24);
+        assert_eq!(table.rows[0].cells[1].borders.bottom.unwrap().style, "dashed");
+        assert_eq!(table.rows[1].cells[0].borders.bottom.unwrap().style, "solid");
+    }
+
+    #[test]
+    fn preview_unsized_table_and_cell_borders_keep_zero_width() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblBorders>
+            <w:top w:val="single"/><w:bottom w:val="single" w:sz="4"/>
+            </w:tblBorders></w:tblPr><w:tr><w:tc><w:tcPr><w:tcBorders>
+            <w:bottom w:val="single"/><w:left w:val="dashed" w:sz="8"/>
+            </w:tcBorders></w:tcPr><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr>
+            </w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        let cell = &table.rows[0].cells[0];
+        assert_eq!(cell.borders.top.unwrap().width_eighths, 0);
+        assert_eq!(cell.borders.bottom.unwrap().width_eighths, 0);
+        assert_eq!(cell.borders.left.unwrap().width_eighths, 8);
+        assert_eq!(table.rows[0].cells[1].borders.bottom.unwrap().width_eighths, 4);
+    }
+
+    #[test]
+    fn preview_inherits_partial_table_borders_and_conditional_cell_edges() {
+        let styles = r#"<w:styles><w:style w:type="table" w:styleId="Base"><w:tblPr><w:tblBorders>
+            <w:top w:val="single" w:sz="4" w:color="000000"/><w:bottom w:val="dashed" w:sz="8"/>
+            </w:tblBorders></w:tblPr></w:style>
+            <w:style w:type="table" w:styleId="Child"><w:basedOn w:val="Base"/>
+            <w:tblPr><w:tblBorders><w:left w:val="dotted" w:sz="12"/></w:tblBorders></w:tblPr>
+            <w:tblStylePr w:type="firstRow"><w:tcPr><w:shd w:fill="204060"/>
+            <w:tcBorders><w:right w:val="double" w:sz="16"/></w:tcBorders></w:tcPr></w:tblStylePr>
+            </w:style></w:styles>"#;
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblStyle w:val="Child"/>
+            <w:tblLook w:firstRow="1"/><w:tblBorders><w:bottom w:val="nil"/></w:tblBorders>
+            </w:tblPr><w:tr><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let blocks = parse_with_styles(xml, styles);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        let cell = &table.rows[0].cells[0];
+        assert!(!cell.is_header);
+        assert_eq!(cell.shading, Some(Color::rgb(0x20, 0x40, 0x60)));
+        assert_eq!(cell.borders.top.unwrap().style, "solid");
+        assert_eq!(cell.borders.left.unwrap().style, "dotted");
+        assert_eq!(cell.borders.right.unwrap().style, "double");
+        assert_eq!(cell.borders.bottom.unwrap().style, "none");
+    }
+
+    #[test]
+    fn preview_row_table_exceptions_preserve_dashes_and_cell_overrides() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblBorders>
+            <w:top w:val="single"/><w:bottom w:val="single"/>
+            <w:left w:val="single"/><w:right w:val="single"/>
+            <w:insideH w:val="single"/><w:insideV w:val="single"/>
+            </w:tblBorders></w:tblPr><w:tr><w:tblPrEx><w:tblBorders>
+            <w:top w:val="dashed" w:sz="16" w:color="112233"/>
+            <w:bottom w:val="dotted" w:sz="12" w:color="445566"/>
+            <w:start w:val="dashed" w:sz="8"/><w:end w:val="nil"/>
+            <w:insideV w:val="dotted" w:sz="8" w:color="778899"/>
+            </w:tblBorders></w:tblPrEx>
+            <w:tc><w:tcPr><w:tcBorders><w:top w:val="double" w:sz="24"/></w:tcBorders></w:tcPr><w:p/></w:tc>
+            <w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        let first = &table.rows[0].cells[0];
+        let last = &table.rows[0].cells[1];
+        assert_eq!(first.borders.top.unwrap().style, "double");
+        assert_eq!(first.borders.left.unwrap().style, "dashed");
+        assert_eq!(first.borders.right.unwrap().style, "dotted");
+        assert_eq!(last.borders.top.unwrap().style, "dashed");
+        assert_eq!(last.borders.top.unwrap().width_eighths, 16);
+        assert_eq!(last.borders.top.unwrap().color, Some(Color::rgb(0x11, 0x22, 0x33)));
+        assert_eq!(last.borders.left.unwrap().color, Some(Color::rgb(0x77, 0x88, 0x99)));
+        assert_eq!(last.borders.bottom.unwrap().style, "dotted");
+        assert_eq!(last.borders.bottom.unwrap().width_eighths, 12);
+        assert_eq!(last.borders.right.unwrap().style, "none");
+    }
+
+    #[test]
+    fn preview_row_table_exceptions_select_current_alternate_content() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tr><mc:AlternateContent>
+            <mc:Choice Requires="w14"><w:tblPrEx>
+                <w:tblPrExChange><w:tblPrEx><w:tblBorders><w:top w:val="double"/></w:tblBorders></w:tblPrEx></w:tblPrExChange>
+                <mc:AlternateContent>
+                    <mc:Choice Requires="w14"><w:tblBorders><w:top w:val="dashed" w:sz="20"/><w:bottom w:val="dotted"/></w:tblBorders></mc:Choice>
+                    <mc:Fallback><w:tblBorders><w:top w:val="double"/></w:tblBorders></mc:Fallback>
+                </mc:AlternateContent>
+            </w:tblPrEx><w:tc><w:p/></w:tc></mc:Choice>
+            <mc:Fallback><w:tblPrEx><w:tblBorders><w:top w:val="single"/></w:tblBorders></w:tblPrEx><w:tc><w:p/></w:tc></mc:Fallback>
+            </mc:AlternateContent></w:tr></w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        assert_eq!(table.rows[0].cells.len(), 1);
+        let borders = table.rows[0].cells[0].borders;
+        assert_eq!(borders.top.unwrap().style, "dashed");
+        assert_eq!(borders.top.unwrap().width_eighths, 20);
+        assert_eq!(borders.bottom.unwrap().style, "dotted");
+    }
+
+    #[test]
+    fn preview_row_table_exceptions_use_merged_final_row_and_keep_other_rows() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblBorders>
+            <w:top w:val="single"/><w:bottom w:val="single"/><w:insideH w:val="single"/>
+            </w:tblBorders></w:tblPr><w:tr><w:tblPrEx><w:tblBorders>
+            <w:top w:val="dashed" w:sz="8"/>
+            </w:tblBorders></w:tblPrEx>
+            <w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tblPrEx><w:tblBorders><w:bottom w:val="dotted" w:sz="16" w:color="334455"/></w:tblBorders></w:tblPrEx>
+            <w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr>
+            </w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        let merged = &table.rows[0].cells[0];
+        assert_eq!(merged.row_span, 2);
+        assert_eq!(merged.borders.top.unwrap().style, "dashed");
+        assert_eq!(merged.borders.bottom.unwrap().style, "dotted");
+        assert_eq!(merged.borders.bottom.unwrap().width_eighths, 16);
+        assert_eq!(merged.borders.bottom.unwrap().color, Some(Color::rgb(0x33, 0x44, 0x55)));
+        assert_eq!(table.rows[0].cells[1].borders.bottom.unwrap().style, "solid");
+        assert_eq!(table.rows[1].cells[0].borders.top.unwrap().style, "solid");
+    }
+
+    #[test]
+    fn preview_row_table_exceptions_apply_top_and_bottom_to_interior_rows() {
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblBorders>
+            <w:insideH w:val="single"/>
+            </w:tblBorders></w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tblPrEx><w:tblBorders>
+            <w:top w:val="dashed"/><w:bottom w:val="dotted"/><w:insideH w:val="double"/>
+            </w:tblBorders></w:tblPrEx><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tc><w:p/></w:tc></w:tr>
+            </w:tbl></w:body></w:document>"#;
+        let blocks = parse(xml);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        assert_eq!(table.rows[1].cells[0].borders.top.unwrap().style, "dashed");
+        assert_eq!(table.rows[1].cells[0].borders.bottom.unwrap().style, "dotted");
+        assert_eq!(table.rows[0].cells[0].borders.bottom.unwrap().style, "solid");
+        assert_eq!(table.rows[2].cells[0].borders.top.unwrap().style, "solid");
+    }
+
+    #[test]
+    fn preview_conditional_inside_borders_stay_within_their_cell_group() {
+        let styles = r#"<w:styles><w:style w:type="table" w:styleId="Header"><w:tblPr><w:tblBorders>
+            <w:insideV w:val="single"/><w:insideH w:val="single"/></w:tblBorders></w:tblPr>
+            <w:tblStylePr w:type="firstRow"><w:tcPr><w:tcBorders>
+            <w:insideV w:val="dotted" w:color="123456"/><w:insideH w:val="dashed"/>
+            </w:tcBorders></w:tcPr></w:tblStylePr></w:style>
+            <w:style w:type="table" w:styleId="Column"><w:tblPr><w:tblBorders><w:insideV w:val="single"/></w:tblBorders></w:tblPr>
+            <w:tblStylePr w:type="firstCol"><w:tcPr><w:tcBorders><w:insideV w:val="dotted"/></w:tcBorders></w:tcPr></w:tblStylePr>
+            </w:style></w:styles>"#;
+        let xml = r#"<w:document><w:body><w:tbl><w:tblPr><w:tblStyle w:val="Header"/><w:tblLook w:firstRow="1"/></w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr>
+            <w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl>
+            <w:tbl><w:tblPr><w:tblStyle w:val="Column"/><w:tblLook w:firstColumn="1"/></w:tblPr>
+            <w:tr><w:tc><w:p/></w:tc><w:tc><w:p/></w:tc></w:tr></w:tbl></w:body></w:document>"#;
+        let blocks = parse_with_styles(xml, styles);
+        let Block::Table(table) = &blocks[0] else { panic!("table missing") };
+        assert_eq!(table.rows[0].cells[0].borders.right.unwrap().style, "dotted");
+        assert_eq!(table.rows[0].cells[1].borders.left.unwrap().style, "dotted");
+        assert_eq!(table.rows[0].cells[0].borders.left.unwrap().style, "none");
+        assert_eq!(table.rows[0].cells[1].borders.right.unwrap().style, "none");
+        assert_eq!(table.rows[0].cells[0].borders.bottom.unwrap().style, "solid");
+        assert_eq!(table.rows[1].cells[0].borders.right.unwrap().style, "solid");
+        let Block::Table(column) = &blocks[1] else { panic!("table missing") };
+        assert_eq!(column.rows[0].cells[0].borders.right.unwrap().style, "solid");
     }
 
     fn parse_with_media(xml: &str, media: HashMap<String, Image>) -> Vec<Block> {
@@ -8636,6 +9105,7 @@ mod tests {
             extended_properties: &extended_properties,
             file_size_bytes: None,
             preserve_note_local_fields: false,
+            preserve_source_toc_cache: false,
             ref_field_cursor: Default::default(),
             page_field_cursor: Default::default(),
             last_page_field_unsupported_display_format: Default::default(),
@@ -8688,6 +9158,35 @@ mod tests {
     }
 
     #[test]
+    fn section_only_paragraph_keeps_real_empty_lines_and_aligned_hints() {
+        let xml = r#"<w:document><w:body>
+            <w:p/><w:p></w:p>
+            <w:p><w:pPr><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr></w:p>
+            <w:p><w:pPr><w:pageBreakBefore/><w:sectPr><w:type w:val="nextPage"/></w:sectPr></w:pPr></w:p>
+            <w:p><w:pPr><w:pageBreakBefore/></w:pPr></w:p>
+            <w:p><w:pPr><w:keepNext/><w:tabs><w:tab w:val="right" w:leader="dot" w:pos="1440"/></w:tabs></w:pPr><w:r><w:t>after</w:t></w:r></w:p>
+            </w:body></w:document>"#;
+        let (blocks, hints, tabs, rows, cells, nested, cell_spacing) =
+            parse_with_media_styles_and_pagination(xml, HashMap::new(), Styles::default(), true);
+        assert_eq!(blocks.len(), 7);
+        for length in [hints.len(), tabs.len(), rows.len(), cells.len(), nested.len(), cell_spacing.len()] {
+            assert_eq!(length, blocks.len(), "source hints must stay aligned with blocks");
+        }
+        for index in [0, 1, 3, 5] {
+            let Block::Paragraph(paragraph) = &blocks[index] else { panic!("empty paragraph {index}") };
+            assert!(paragraph.runs.is_empty());
+            assert_eq!(paragraph.props.page_break_before, matches!(index, 3 | 5));
+        }
+        assert!(matches!(blocks[2], Block::SectionBreak(_)));
+        assert!(matches!(blocks[4], Block::SectionBreak(_)));
+        let Block::Paragraph(after) = &blocks[6] else { panic!("following paragraph") };
+        assert_eq!(after.text(), "after");
+        assert!(hints[6].keep_next);
+        assert_eq!(tabs[6], vec![TabStop { position_pt: 72.0, alignment: TabAlignment::Right, leader: TabLeader::Dot }]);
+        assert!(tabs[..6].iter().all(Vec::is_empty));
+    }
+
+    #[test]
     fn captures_resolved_top_level_pagination_hints_in_block_order() {
         let styles = super::super::styles::parse(
             r#"<w:styles>
@@ -8734,6 +9233,55 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn source_blank_paragraphs_preserve_layout_and_hint_order() {
+        let xml = r#"<w:document><w:body>
+            <w:p><w:r><w:t>before</w:t></w:r></w:p>
+            <w:p/>
+            <w:p></w:p>
+            <w:p><w:r><w:t xml:space="preserve">   </w:t></w:r></w:p>
+            <w:p><w:r><w:tab/></w:r></w:p>
+            <w:p><w:pPr><w:keepLines/><w:spacing w:before="120" w:line="240" w:lineRule="exact"/></w:pPr></w:p>
+            <w:p><w:r><w:t>after</w:t></w:r></w:p>
+        </w:body></w:document>"#;
+        let (blocks, hints, _, _, _, _, _) =
+            parse_with_media_styles_and_pagination(xml, HashMap::new(), Styles::default(), true);
+        let paragraphs = blocks
+            .iter()
+            .map(|block| match block {
+                Block::Paragraph(paragraph) => paragraph,
+                _ => panic!("source paragraphs must remain in document order"),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            paragraphs
+                .iter()
+                .map(|paragraph| paragraph.text())
+                .collect::<Vec<_>>(),
+            vec!["before", "", "", "   ", "\t", "", "after"]
+        );
+        assert_eq!(hints.len(), blocks.len());
+        assert_eq!(
+            hints.iter().map(|hint| hint.keep_lines).collect::<Vec<_>>(),
+            vec![false, false, false, false, false, true, false]
+        );
+        assert_eq!(paragraphs[5].props.spacing.before_pt, Some(6.0));
+    }
+
+    #[test]
+    fn manual_page_breaks_do_not_invent_blank_paragraph_fragments() {
+        let xml = r#"<w:document><w:body>
+            <w:p><w:r><w:br w:type="page"/><w:t>text</w:t><w:br w:type="page"/></w:r></w:p>
+            <w:p><w:r><w:br w:type="page"/></w:r></w:p>
+        </w:body></w:document>"#;
+        let blocks = parse(xml);
+        assert_eq!(blocks.len(), 4);
+        assert!(matches!(blocks[0], Block::PageBreak));
+        assert!(matches!(&blocks[1], Block::Paragraph(paragraph) if paragraph.text() == "text"));
+        assert!(matches!(blocks[2], Block::PageBreak));
+        assert!(matches!(blocks[3], Block::PageBreak));
     }
 
     #[test]
@@ -10289,6 +10837,7 @@ mod tests {
             width_pct_declared: false,
             margins: CellMarginSpec::default(),
             style_regions: None,
+            borders: CellBorders::default(),
         }
     }
 
@@ -10487,6 +11036,41 @@ mod tests {
     }
 
     #[test]
+    fn drawing_layout_preserves_local_anchor_and_occurrence_size() {
+        let mut media = HashMap::new();
+        media.insert("rIdImg".to_string(), Image {
+            width_px: Some(120), height_px: Some(32), ..Image::default()
+        });
+        let xml = r#"<w:document><w:body>
+            <w:p><w:r><w:drawing><wp:anchor>
+                <wp:positionH relativeFrom="column"><wp:posOffset>57785</wp:posOffset></wp:positionH>
+                <wp:positionV relativeFrom="paragraph"><wp:posOffset>181610</wp:posOffset></wp:positionV>
+                <wp:extent cx="914400" cy="243840"/><a:blip r:embed="rIdImg"/>
+            </wp:anchor></w:drawing></w:r></w:p>
+            <w:p><w:r><w:drawing><wp:inline>
+                <wp:extent cx="1828800" cy="487680"/><a:blip r:embed="rIdImg"/>
+            </wp:inline></w:drawing></w:r></w:p>
+        </w:body></w:document>"#;
+        let blocks = parse_with_media(xml, media);
+        let images: Vec<_> = blocks.iter().filter_map(|block| match block {
+            Block::Paragraph(p) => p.runs.iter().find_map(|run| run.image.as_ref()),
+            _ => None,
+        }).collect();
+        let first = images[0].drawing_layout.as_ref().unwrap();
+        assert_eq!((first.width_px, first.height_px), (Some(96), Some(26)));
+        let anchor = first.anchor.unwrap();
+        assert_eq!((anchor.horizontal_from, anchor.vertical_from), ("column", "paragraph"));
+        assert_eq!((anchor.x_emu, anchor.y_emu), (57785, 181610));
+        assert_eq!(images[0].floating_offset_emu, None, "Keep the page-relative writer contract");
+        let second = images[1].drawing_layout.as_ref().unwrap();
+        assert_eq!((second.width_px, second.height_px), (Some(192), Some(51)));
+        assert_eq!(second.anchor, None);
+        for image in images {
+            assert_eq!((image.width_px, image.height_px), (Some(120), Some(32)), "Raster dimensions must not change");
+        }
+    }
+
+    #[test]
     fn scans_header_footer_references() {
         let xml = r#"<w:document><w:body>
             <w:p><w:r><w:t>x</w:t></w:r></w:p>
@@ -10601,6 +11185,26 @@ mod tests {
         assert_eq!(sections[0].footer_distance_twips, None);
         assert_eq!(sections[1].header_distance_twips, Some(720));
         assert_eq!(sections[1].footer_distance_twips, None);
+    }
+
+    #[test]
+    fn preview_section_types_keep_continuous_and_selected_alternate_branch() {
+        let xml = r#"<w:document><w:body>
+            <w:del><w:sectPr><w:type w:val="oddPage"/></w:sectPr></w:del>
+            <w:p><w:pPr><w:sectPr><w:type w:val="continuous"/></w:sectPr></w:pPr></w:p>
+            <w:p><w:pPr><w:sectPr><mc:AlternateContent>
+                <mc:Choice><w:type w:val="nextColumn"/></mc:Choice>
+                <mc:Fallback><w:type w:val="nextPage"/></mc:Fallback>
+            </mc:AlternateContent></w:sectPr></w:pPr></w:p>
+            <w:sectPr/>
+        </w:body></w:document>"#;
+        assert_eq!(
+            scan_hf_ref_sections(xml)
+                .iter()
+                .map(|section| section.break_type)
+                .collect::<Vec<_>>(),
+            vec![Some("continuous"), Some("nextColumn"), None]
+        );
     }
 
     #[test]
@@ -11030,6 +11634,7 @@ mod tests {
             extended_properties: &extended_properties,
             file_size_bytes: None,
             preserve_note_local_fields: false,
+            preserve_source_toc_cache: false,
             ref_field_cursor: Default::default(),
             page_field_cursor: Default::default(),
             last_page_field_unsupported_display_format: Default::default(),
@@ -11113,6 +11718,7 @@ mod tests {
             extended_properties: &extended_properties,
             file_size_bytes: None,
             preserve_note_local_fields: false,
+            preserve_source_toc_cache: false,
             ref_field_cursor: Default::default(),
             page_field_cursor: Default::default(),
             last_page_field_unsupported_display_format: Default::default(),
@@ -11209,6 +11815,7 @@ mod tests {
             extended_properties: &extended_properties,
             file_size_bytes: None,
             preserve_note_local_fields: false,
+            preserve_source_toc_cache: false,
             ref_field_cursor: Default::default(),
             page_field_cursor: Default::default(),
             last_page_field_unsupported_display_format: Default::default(),
@@ -12438,6 +13045,66 @@ mod tests {
                 left: 480,
             })
         );
+    }
+
+    #[test]
+    fn table_row_minimum_heights_follow_source_rules() {
+        let row_props = [
+            r#"<w:trHeight w:val="1200" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="427" w:hRule="atLeast"></w:trHeight>"#,
+            "",
+            r#"<w:trHeight w:val="1200"/>"#,
+            r#"<w:trHeight w:val="1200" w:hRule="auto"/>"#,
+            r#"<w:trHeight w:val="1200" w:hRule="exact"/>"#,
+            r#"<w:trHeight w:val="0" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="-100" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="NaN" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="inf" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="bad" w:hRule="atLeast"/>"#,
+            r#"<w:trHeight w:val="1200" w:hRule="unknown"/>"#,
+        ];
+        let rows = row_props.iter().map(|props| {
+            format!("<w:tr><w:trPr>{props}</w:trPr><w:tc><w:p/></w:tc></w:tr>")
+        }).collect::<String>();
+        let blocks = parse(&format!(
+            "<w:document><w:body><w:tbl>{rows}</w:tbl></w:body></w:document>"
+        ));
+        let Block::Table(table) = &blocks[0] else { panic!("table") };
+        let mut expected = vec![None; row_props.len()];
+        expected[0] = Some(60.0);
+        expected[1] = Some(21.35);
+        assert_eq!(table.row_min_heights_pt, expected);
+    }
+
+    #[test]
+    fn table_row_minimum_heights_respect_selected_properties_and_source_rows() {
+        let blocks = parse(r#"<w:document xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"><w:body><w:tbl>
+            <w:tr><w:trPr><w:trHeight w:val="600" w:hRule="atLeast"/>
+                <w:trPrChange><w:trPr><w:trHeight w:val="2400" w:hRule="atLeast"/></w:trPr></w:trPrChange>
+            </w:trPr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p/></w:tc></w:tr>
+            <w:sdt><w:sdtContent><w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc></w:tr></w:sdtContent></w:sdt>
+            <w:tr><w:trPr><mc:AlternateContent>
+                <mc:Choice Requires="w14"><w:trHeight w:val="800" w:hRule="atLeast"></w:trHeight></mc:Choice>
+                <mc:Fallback><w:trHeight w:val="3600" w:hRule="atLeast"/></mc:Fallback>
+            </mc:AlternateContent></w:trPr><w:tc><w:p/>
+                <w:tbl><w:tr><w:trPr><w:trHeight w:val="400" w:hRule="atLeast"/></w:trPr><w:tc><w:p/></w:tc></w:tr></w:tbl>
+            </w:tc></w:tr>
+            <w:tr><w:trPr><w:trHeight w:val="600" w:hRule="atLeast"/><mc:AlternateContent>
+                <mc:Choice Requires="w14"><w:trHeight w:val="1800" w:hRule="auto"/></mc:Choice>
+                <mc:Fallback><w:trHeight w:val="3600" w:hRule="atLeast"/></mc:Fallback>
+            </mc:AlternateContent></w:trPr><w:tc><w:p/></w:tc></w:tr>
+        </w:tbl></w:body></w:document>"#);
+        let Block::Table(table) = &blocks[0] else { panic!("table") };
+        assert_eq!(table.rows.len(), 4);
+        assert_eq!(table.rows[0].cells[0].row_span, 2);
+        assert!(table.rows[1].cells.is_empty());
+        assert_eq!(table.row_min_heights_pt, vec![Some(30.0), None, Some(40.0), None]);
+        let nested = table.rows[2].cells[0].blocks.iter().find_map(|block| match block {
+            Block::Table(table) => Some(table),
+            _ => None,
+        }).expect("nested table");
+        assert_eq!(nested.row_min_heights_pt, vec![Some(20.0)]);
     }
 
     #[test]

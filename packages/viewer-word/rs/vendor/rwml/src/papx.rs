@@ -14,7 +14,7 @@ use crate::chpx::pchg_tabs_operand_len;
 use crate::model::Color;
 #[cfg(any(feature = "docx", feature = "render"))]
 use crate::model::{TabAlignment, TabLeader, TabStop, MAX_TAB_STOPS};
-use crate::table::TableDef;
+use crate::table::{LegacyTableLayout, TableDef};
 use crate::util::{u16le, u32le};
 
 const FKP_SIZE: usize = 512;
@@ -914,7 +914,6 @@ fn blocks_coherent_table_border_projection(sprm: u16) -> bool {
             | SPRM_T_VERT_MERGE
             | SPRM_T_SET_BRC
             | SPRM_T_CELL_SPACING_DEFAULT
-            | SPRM_T_ISTD
             | SPRM_T_CELL_BRC_TYPE
             | SPRM_T_WALL
             | SPRM_T_CNF
@@ -955,6 +954,10 @@ fn scan_grpprl(gp: &[u8], istd: u16) -> (Pap, Option<TableDef>) {
         ..Pap::default()
     };
     let mut table_def = None;
+    let mut table_layout = LegacyTableLayout::default();
+    // Table border defaults and TC80 cell declarations are separate properties.
+    // WPS commonly writes defaults before the cell geometry definition.
+    let mut row_border_defaults = TableDef::default();
     let mut border_projection_blocked = false;
     let mut pos = 0;
     while pos + 2 <= gp.len() {
@@ -993,6 +996,7 @@ fn scan_grpprl(gp: &[u8], istd: u16) -> (Pap, Option<TableDef>) {
             }
             break;
         }
+        table_layout.apply_sprm(sprm, &gp[op..operand_end]);
         if apply_pagination_sprm(&mut pap.pagination, sprm, &gp[op..operand_end]) {
             pos = operand_end;
             continue;
@@ -1053,6 +1057,7 @@ fn scan_grpprl(gp: &[u8], istd: u16) -> (Pap, Option<TableDef>) {
             SPRM_T_DEF_TABLE => {
                 if let Some(operand) = gp.get(op..op + len) {
                     if let Some(mut definition) = TableDef::parse(operand) {
+                        definition.inherit_row_borders(&row_border_defaults);
                         if border_projection_blocked {
                             definition.block_border_projection();
                         }
@@ -1068,20 +1073,37 @@ fn scan_grpprl(gp: &[u8], istd: u16) -> (Pap, Option<TableDef>) {
             SPRM_T_TABLE_BORDERS_80 => {
                 let operand = &gp[op..operand_end];
                 let valid = TableDef::table_borders80_operand_is_valid(operand);
-                let applied = table_def
-                    .as_mut()
-                    .is_some_and(|definition| definition.apply_table_borders80(operand));
-                if !valid || !applied {
+                row_border_defaults.apply_table_borders80(operand);
+                if let Some(definition) = table_def.as_mut() {
+                    definition.apply_table_borders80(operand);
+                }
+                if !valid {
                     block_table_border_projection(&mut table_def, &mut border_projection_blocked);
                 }
             }
             SPRM_T_TABLE_BORDERS => {
                 let operand = &gp[op..operand_end];
                 let valid = TableDef::table_borders_operand_is_valid(operand);
-                let applied = table_def
-                    .as_mut()
-                    .is_some_and(|definition| definition.apply_table_borders(operand));
-                if !valid || !applied {
+                row_border_defaults.apply_table_borders(operand);
+                if let Some(definition) = table_def.as_mut() {
+                    definition.apply_table_borders(operand);
+                }
+                if !valid {
+                    block_table_border_projection(&mut table_def, &mut border_projection_blocked);
+                }
+            }
+            // MS-DOC sprmTIstd replaces borders; later direct declarations can
+            // override the style again, but earlier ones must not leak through.
+            SPRM_T_ISTD => {
+                row_border_defaults.reset_border_properties();
+                if let Some(definition) = table_def.as_mut() {
+                    definition.reset_border_properties();
+                }
+            }
+            SPRM_T_BRC_TOP_CV | SPRM_T_BRC_LEFT_CV | SPRM_T_BRC_BOTTOM_CV | SPRM_T_BRC_RIGHT_CV => {
+                if !table_def.as_ref().is_some_and(|definition| {
+                    definition.automatic_cell_border_colors(&gp[op..operand_end])
+                }) {
                     block_table_border_projection(&mut table_def, &mut border_projection_blocked);
                 }
             }
@@ -1095,6 +1117,9 @@ fn scan_grpprl(gp: &[u8], istd: u16) -> (Pap, Option<TableDef>) {
     #[cfg(any(feature = "docx", feature = "render"))]
     if pos != gp.len() {
         pap.tab_stop_changes.invalidate();
+    }
+    if let Some(definition) = table_def.as_mut() {
+        definition.layout = table_layout;
     }
     (pap, table_def)
 }
@@ -1850,19 +1875,107 @@ mod tests {
     }
 
     #[test]
-    fn pre_definition_row_borders_do_not_project_over_default_tc80() {
+    fn table_layout_properties_survive_definition_order_and_replacement() {
+        let geometry = [0x14, 0xF6, 2, 0x88, 0x13,
+            0x07, 0x94, 0x58, 0x02,
+            0x34, 0xD6, 6, 0, 1, 0x0A, 3, 80, 0];
+        for before in [true, false] {
+            let definition = table_def_sprm();
+            let mut grpprl = if before {
+                [geometry.as_slice(), definition.as_slice()].concat()
+            } else {
+                [definition.as_slice(), geometry.as_slice()].concat()
+            };
+            grpprl.extend_from_slice(&definition);
+            let table = table_from_grpprl(&grpprl);
+            assert!(table.fixed_layout);
+            assert_eq!(table.width_pct, Some(1.0));
+            assert!(table.row_min_heights_pt.iter().all(|height| *height == Some(30.0)));
+            assert_eq!(table.rows[0].cells[0].margins.unwrap().left, 80);
+            grpprl.extend_from_slice(&[0x15, 0x36, 1]);
+            assert!(!table_from_grpprl(&grpprl).fixed_layout);
+        }
+    }
+
+    #[test]
+    fn pre_definition_row_borders_are_retained_for_inheriting_tc80() {
         let mut grpprl = table_borders80_sprm(8, 0x01, 6);
         grpprl.extend_from_slice(&table_def_sprm());
 
-        assert_no_projected_table_borders(&table_from_grpprl(&grpprl));
+        let table = table_from_grpprl(&grpprl);
+        let border = table.rows[0].cells[0].borders.top.unwrap();
+        assert_eq!(border.style, "solid");
+        assert_eq!(border.width_eighths, 8);
+        assert_eq!(border.color, Some(Color::rgb(255, 0, 0)));
     }
 
     #[test]
     fn pre_definition_row_borders_do_not_bypass_later_tc80_cell_properties() {
         let mut grpprl = table_borders80_sprm(8, 0x01, 6);
-        grpprl.extend_from_slice(&table_def_sprm_with_tc80([8, 0x01, 6, 0]));
+        grpprl.extend_from_slice(&table_def_sprm_with_tc80([12, 0x07, 2, 0]));
 
-        assert_no_projected_table_borders(&table_from_grpprl(&grpprl));
+        let table = table_from_grpprl(&grpprl);
+        assert_no_projected_table_borders(&table);
+        let border = table.rows[0].cells[0].borders.top.unwrap();
+        assert_eq!(border.style, "dashed");
+        assert_eq!(border.width_eighths, 12);
+        assert_eq!(border.color, Some(Color::rgb(0, 0, 255)));
+    }
+
+    #[test]
+    fn direct_row_borders_survive_table_style_and_automatic_cell_colors() {
+        // WPS writes table style, defaults, TDefTable, then four color arrays.
+        let mut grpprl = vec![0x3A, 0x56, 11, 0];
+        grpprl.extend_from_slice(&table_borders80_sprm(12, 0x01, 0));
+        grpprl.extend_from_slice(&table_def_sprm());
+        for sprm in [
+            SPRM_T_BRC_TOP_CV,
+            SPRM_T_BRC_LEFT_CV,
+            SPRM_T_BRC_BOTTOM_CV,
+            SPRM_T_BRC_RIGHT_CV,
+        ] {
+            grpprl.extend_from_slice(&sprm.to_le_bytes());
+            grpprl.extend_from_slice(&[8, 0, 0, 0, 255, 0, 0, 0, 255]);
+        }
+        let table = table_from_grpprl(&grpprl);
+        for row in table.rows {
+            for cell in row.cells {
+                for border in [
+                    cell.borders.top,
+                    cell.borders.right,
+                    cell.borders.bottom,
+                    cell.borders.left,
+                ] {
+                    let border = border.unwrap();
+                    assert_eq!(border.style, "solid");
+                    assert_eq!(border.width_eighths, 12);
+                    assert_eq!(border.color, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn later_table_style_clears_earlier_direct_borders_and_defaults() {
+        let style = [0x3A, 0x56, 11, 0];
+        let defaults = table_borders80_sprm(8, 0x01, 6);
+        let direct = table_def_sprm_with_tc80([12, 0x07, 2, 0]);
+        let mut grpprl = defaults.clone();
+        grpprl.extend_from_slice(&direct);
+        grpprl.extend_from_slice(&style);
+        let table = table_from_grpprl(&grpprl);
+        assert_no_projected_table_borders(&table);
+        assert!(table.rows.iter().flat_map(|row| &row.cells).all(|cell| {
+            cell.borders == crate::model::CellBorders::default()
+        }));
+
+        // The reset also removes defaults pending before a new TDefTable.
+        grpprl.extend_from_slice(&table_def_sprm());
+        assert!(table_from_grpprl(&grpprl).rows[0].cells[0].borders.top.is_none());
+
+        // A later source border declaration takes effect again.
+        grpprl.extend_from_slice(&defaults);
+        assert_eq!(table_from_grpprl(&grpprl).rows[0].cells[0].borders.top.unwrap().width_eighths, 8);
     }
 
     #[test]

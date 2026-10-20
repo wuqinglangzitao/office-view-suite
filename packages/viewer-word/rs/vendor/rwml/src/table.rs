@@ -8,8 +8,8 @@
 #[cfg(feature = "docx")]
 use crate::model::TableCellColumnBreakHints;
 use crate::model::{
-    Block, Cell, Color, LineSpacingHint, PaginationHint, Row, Table, TableBorderSide,
-    TableBorderStyle, TableCellLineSpacingHints, TableCellPaginationHints,
+    Block, Cell, CellBorder, CellBorders, CellMargins, Color, LineSpacingHint, PaginationHint, Row, Table,
+    TableBorderSide, TableBorderStyle, TableCellLineSpacingHints, TableCellPaginationHints, VCell,
 };
 #[cfg(any(feature = "docx", feature = "render"))]
 use crate::model::{TabStop, TableCellTabStopHints};
@@ -62,16 +62,77 @@ struct LegacyRowBorders {
     inside_v: LegacyBorderState,
 }
 
+/// MS-DOC 2.6.3 table layout properties. These are independent of the order of
+/// sprmTDefTable, which supplies cell definitions rather than layout defaults.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct LegacyTableLayout {
+    auto_fit: bool,
+    width_pct: Option<f32>,
+    minimum_height_pt: Option<f32>,
+    margins: CellMargins,
+}
+
+impl Default for LegacyTableLayout {
+    fn default() -> Self {
+        Self {
+            auto_fit: false,
+            width_pct: None,
+            minimum_height_pt: None,
+            margins: CellMargins { top: 0, right: 108, bottom: 0, left: 108 },
+        }
+    }
+}
+
+impl LegacyTableLayout {
+    pub(crate) fn apply_sprm(&mut self, sprm: u16, operand: &[u8]) {
+        match (sprm, operand) {
+            // sprmTFAutofit: fixed columns are the binary format's default.
+            (0x3615, [value @ 0..=1]) => self.auto_fit = *value == 1,
+            // FtsWWidth_Table: percentages use fiftieths of one percent.
+            (0xF614, [unit, low, high]) => {
+                let value = u16::from_le_bytes([*low, *high]);
+                match (*unit, value) {
+                    (2, 0..=30_000) => self.width_pct = Some(value as f32 / 5000.0),
+                    (0 | 1, 0) | (3, 0..=31_680) => self.width_pct = None,
+                    _ => {}
+                }
+            }
+            // YAS: positive means at least; zero is content-derived. Exact
+            // negative heights are not projected as minimum heights.
+            (0x9407, [low, high]) => {
+                let height = i16::from_le_bytes([*low, *high]);
+                if (-31_680..=31_680).contains(&height) {
+                    self.minimum_height_pt = (height > 0).then_some(height as f32 / 20.0);
+                }
+            }
+            // CSSAOperand for row-default padding: cb, first, limit, sides,
+            // unit, width. Validate the whole operand before touching a side.
+            (0xD634, [6, 0, 1, sides, unit, low, high]) if sides & !0x0F == 0 => {
+                let width = u16::from_le_bytes([*low, *high]);
+                if !matches!((*unit, width), (0, 0) | (3, 0..=31_680)) { return; }
+                for (mask, target) in [
+                    (1, &mut self.margins.top), (2, &mut self.margins.left),
+                    (4, &mut self.margins.bottom), (8, &mut self.margins.right),
+                ] {
+                    if sides & mask != 0 { *target = u32::from(width); }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A parsed row definition (the `sprmTDefTable` operand carried on the TTP).
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TableDef {
+    pub layout: LegacyTableLayout,
     /// Cell-boundary x-positions in twips (`itcMac + 1` entries).
     pub rgdxa: Vec<i16>,
     /// Per-cell `TC80.tcgrf` (merge flags); `itcMac` entries.
     pub tcgrf: Vec<u16>,
     /// Complete direct TC80 border state for each cell.
     cell_borders: Vec<LegacyCellBorders>,
-    /// A later direct row-wide border modifier, if one was applied.
+    /// Direct table/row border defaults, independent of the TC80 definition order.
     row_borders: Option<LegacyRowBorders>,
     /// A later table modifier made exact six-role projection ambiguous.
     border_projection_blocked: bool,
@@ -118,6 +179,7 @@ impl TableDef {
             || tc_bytes.len() % TC80_LEN != 0
             || rgdxa.windows(2).any(|pair| pair[0] == pair[1]);
         Some(TableDef {
+            layout: LegacyTableLayout::default(),
             rgdxa,
             tcgrf,
             cell_borders,
@@ -152,6 +214,117 @@ impl TableDef {
 
     pub(crate) fn block_border_projection(&mut self) {
         self.border_projection_blocked = true;
+    }
+
+    pub(crate) fn inherit_row_borders(&mut self, defaults: &TableDef) {
+        self.row_borders = defaults.row_borders;
+    }
+
+    /// Applying a table style replaces existing borders. Its unsupported style
+    /// borders stay unspecified until a later direct declaration supplies them.
+    pub(crate) fn reset_border_properties(&mut self) {
+        self.row_borders = None;
+        self.cell_borders.fill(LegacyCellBorders::default());
+    }
+
+    /// Automatic TC color arrays do not change a default/automatic TC80 border.
+    /// Explicit color overrides remain unsupported rather than rendering stale colors.
+    pub(crate) fn automatic_cell_border_colors(&self, operand: &[u8]) -> bool {
+        let count = self.tcgrf.len();
+        operand.first().copied().map(usize::from) == Some(count * 4)
+            && operand.len() == 1 + count * 4
+            && operand[1..]
+                .chunks_exact(4)
+                .all(|color| color == [0, 0, 0, 0xFF])
+            && self.cell_borders.iter().all(|cell| {
+                [cell.top, cell.left, cell.bottom, cell.right]
+                    .into_iter()
+                    .all(|border| {
+                        !matches!(
+                            border,
+                            LegacyBorderState::Positive(LegacyBorder {
+                                color: LegacyBorderColor::Explicit(_),
+                                ..
+                            })
+                        )
+                    })
+            })
+    }
+
+    fn resolved_cell_borders(&self, cell: usize, row: usize, row_count: usize) -> CellBorders {
+        if self.border_projection_blocked {
+            return CellBorders::default();
+        }
+        let Some(direct) = self.cell_borders.get(cell) else {
+            return CellBorders::default();
+        };
+        let defaults = self.row_borders.unwrap_or_default();
+        let edge = |direct, inherited| {
+            modeled_cell_border(if direct == LegacyBorderState::Inherit {
+                inherited
+            } else {
+                direct
+            })
+        };
+        CellBorders {
+            top: edge(
+                direct.top,
+                if row == 0 {
+                    defaults.top
+                } else {
+                    defaults.inside_h
+                },
+            ),
+            bottom: edge(
+                direct.bottom,
+                if row + 1 == row_count {
+                    defaults.bottom
+                } else {
+                    defaults.inside_h
+                },
+            ),
+            left: edge(
+                direct.left,
+                if cell == 0 {
+                    defaults.left
+                } else {
+                    defaults.inside_v
+                },
+            ),
+            right: edge(
+                direct.right,
+                if cell + 1 == self.tcgrf.len() {
+                    defaults.right
+                } else {
+                    defaults.inside_v
+                },
+            ),
+            ..CellBorders::default()
+        }
+    }
+}
+
+fn modeled_cell_border(state: LegacyBorderState) -> Option<CellBorder> {
+    match state {
+        LegacyBorderState::Inherit => None,
+        LegacyBorderState::Nil | LegacyBorderState::Unsupported => Some(CellBorder {
+            style: "none",
+            color: None,
+            width_eighths: 0,
+        }),
+        LegacyBorderState::Positive(border) => Some(CellBorder {
+            style: match border.style {
+                TableBorderStyle::Single => "solid",
+                TableBorderStyle::Double => "double",
+                TableBorderStyle::Dotted => "dotted",
+                TableBorderStyle::Dashed => "dashed",
+            },
+            color: match border.color {
+                LegacyBorderColor::Auto => None,
+                LegacyBorderColor::Explicit(color) => Some(color),
+            },
+            width_eighths: border.size_eighths,
+        }),
     }
 }
 
@@ -269,6 +442,8 @@ pub(crate) struct TableBuildOutput {
 /// An output cell during merge resolution.
 struct Out {
     blocks: Vec<Block>,
+    borders: CellBorders,
+    margins: Option<CellMargins>,
     pagination: Vec<Option<PaginationHint>>,
     line_spacing: Vec<Option<LineSpacingHint>>,
     #[cfg(feature = "docx")]
@@ -515,6 +690,11 @@ pub(crate) fn build(rows: Vec<RowBuild>) -> TableBuildOutput {
 pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> TableBuildOutput {
     let borders = coherent_table_borders(&rows);
     let header_rows = rows.iter().take_while(|r| r.header).count();
+    let fixed_layout = rows.iter().any(|row| row.def.is_some())
+        && rows.iter().filter_map(|row| row.def.as_ref()).all(|def| !def.layout.auto_fit);
+    let width_pct = rows.iter().filter_map(|row| row.def.as_ref()).find_map(|def| def.layout.width_pct);
+    let row_min_heights_pt = rows.iter()
+        .map(|row| row.def.as_ref().and_then(|def| def.layout.minimum_height_pt)).collect();
 
     // Global sorted set of distinct boundary positions across the whole table.
     let mut bounds: Vec<i16> = rows
@@ -530,7 +710,8 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
     // Phase A: per-row cells, folding `fMerged` left and computing colspan/col
     // from the global boundary set (or sequential columns when no row definition).
     let mut grid: Vec<Vec<Out>> = Vec::with_capacity(rows.len());
-    for rb in rows {
+    let row_count = rows.len();
+    for (row_index, rb) in rows.into_iter().enumerate() {
         let mut out: Vec<Out> = Vec::new();
         match rb.def.filter(|d| d.rgdxa.len() >= 2) {
             Some(def) => {
@@ -538,11 +719,20 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
                 let mut cells = rb.cells.into_iter();
                 for k in 0..ncell {
                     let cell = cells.next().unwrap_or_default();
+                    let borders = def.resolved_cell_borders(k, row_index, row_count);
                     let g = def.tcgrf.get(k).copied().unwrap_or(0);
                     let (left, right) = (def.rgdxa[k], def.rgdxa[k + 1]);
                     if g & F_MERGED != 0 && !out.is_empty() {
                         let last = out.last_mut().expect("non-empty");
                         last.colspan = (col_of(right).saturating_sub(last.col)).max(1) as u16;
+                        last.borders.right = borders.right;
+                        // A single CSS edge cannot represent differing segments.
+                        if last.borders.top != borders.top {
+                            last.borders.top = None;
+                        }
+                        if last.borders.bottom != borders.bottom {
+                            last.borders.bottom = None;
+                        }
                         last.blocks.extend(cell.blocks);
                         last.pagination.extend(cell.pagination);
                         last.line_spacing.extend(cell.line_spacing);
@@ -555,6 +745,8 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
                         let colspan = (col_of(right).saturating_sub(col)).max(1) as u16;
                         out.push(Out {
                             blocks: cell.blocks,
+                            borders,
+                            margins: Some(def.layout.margins),
                             pagination: cell.pagination,
                             line_spacing: cell.line_spacing,
                             #[cfg(feature = "docx")]
@@ -586,6 +778,8 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
                 for (k, cell) in rb.cells.into_iter().enumerate() {
                     out.push(Out {
                         blocks: cell.blocks,
+                        borders: CellBorders::default(),
+                        margins: None,
                         pagination: cell.pagination,
                         line_spacing: cell.line_spacing,
                         #[cfg(feature = "docx")]
@@ -618,6 +812,15 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
                 open.insert(col, (r, o));
             } else if vert_merge {
                 if let Some(&(rr, oo)) = open.get(&col) {
+                    let continued = grid[r][o].borders;
+                    let owner = &mut grid[rr][oo];
+                    owner.borders.bottom = continued.bottom;
+                    if owner.borders.left != continued.left {
+                        owner.borders.left = None;
+                    }
+                    if owner.borders.right != continued.right {
+                        owner.borders.right = None;
+                    }
                     grid[rr][oo].rowspan = grid[rr][oo].rowspan.saturating_add(1);
                     grid[r][o].dropped = true;
                 }
@@ -668,9 +871,24 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
             row_tab_stops.push(output.tab_stops);
             cells.push(Cell {
                 blocks: output.blocks,
+                borders: if bidi_visual {
+                    CellBorders {
+                        left: output.borders.right,
+                        right: output.borders.left,
+                        ..output.borders
+                    }
+                } else {
+                    output.borders
+                },
                 col_span: output.colspan,
                 row_span: output.rowspan,
                 is_header,
+                margins: output.margins,
+                valign: match (output.tcgrf >> 7) & 3 {
+                    1 => VCell::Center,
+                    2 => VCell::Bottom,
+                    _ => VCell::Top,
+                },
                 ..Default::default()
             });
         }
@@ -686,6 +904,9 @@ pub(crate) fn build_with_direction(rows: Vec<RowBuild>, bidi_visual: bool) -> Ta
         rows: model_rows,
         header_rows,
         col_widths_pct,
+        fixed_layout,
+        width_pct,
+        row_min_heights_pt,
         bidi_visual,
         ..Default::default()
     };
@@ -735,6 +956,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn legacy_form_layout_retains_row_minima_cell_margins_and_vertical_alignment() {
+        let mut first = row_with_bounds(&[0, 1000, 4000]);
+        let definition = first.def.as_mut().unwrap();
+        definition.tcgrf = vec![0x0080, 0x0100];
+        definition.layout.apply_sprm(0x9407, &600i16.to_le_bytes());
+        definition.layout.apply_sprm(0xF614, &[2, 0x88, 0x13]);
+        definition.layout.apply_sprm(0xD634, &[6, 0, 1, 0x05, 3, 40, 0]);
+        let table = build(vec![first, row_with_bounds(&[0, 4000])]).table;
+        assert!(table.fixed_layout);
+        assert_eq!(table.width_pct, Some(1.0));
+        assert_eq!(table.row_min_heights_pt, vec![Some(30.0), None]);
+        assert_eq!(table.col_widths_pct, vec![0.25, 0.75]);
+        assert_eq!(table.rows[1].cells[0].col_span, 2);
+        assert_eq!(table.rows[0].cells[0].valign, VCell::Center);
+        assert_eq!(table.rows[0].cells[1].valign, VCell::Bottom);
+        assert_eq!(table.rows[0].cells[0].margins,
+            Some(CellMargins { top: 40, bottom: 40, left: 108, right: 108 }));
+    }
+
+    #[test]
+    fn legacy_layout_ignores_invalid_operands_and_honors_autofit() {
+        let mut row = row_with_bounds(&[0, 1000, 2000]);
+        let layout = &mut row.def.as_mut().unwrap().layout;
+        layout.apply_sprm(0x3615, &[1]);
+        layout.apply_sprm(0x3615, &[2]);
+        layout.apply_sprm(0xF614, &[2, 0xC4, 0x09]); // 50%
+        layout.apply_sprm(0xF614, &[2, 0xFF, 0xFF]);
+        layout.apply_sprm(0xD634, &[6, 0, 1, 0xFA, 3, 40, 0]);
+        layout.apply_sprm(0xD634, &[6, 0, 1, 0x0A, 3, 0xFF, 0xFF]);
+        layout.apply_sprm(0x9407, &600i16.to_le_bytes());
+        layout.apply_sprm(0x9407, &i16::MAX.to_le_bytes());
+        assert_eq!(layout.minimum_height_pt, Some(30.0));
+        layout.apply_sprm(0x9407, &(-600i16).to_le_bytes());
+        let table = build(vec![row]).table;
+        assert!(!table.fixed_layout);
+        assert_eq!(table.width_pct, Some(0.5));
+        assert_eq!(table.row_min_heights_pt, vec![None]);
+        assert_eq!(table.rows[0].cells[0].margins, Some(LegacyTableLayout::default().margins));
+    }
+
     fn brc80(size: u8, style: u8, ico: u8) -> [u8; 4] {
         [size, style, ico, 0]
     }
@@ -772,6 +1034,88 @@ mod tests {
             table.border_sizes.get(side).or(table.border_size_eighths),
             table.border_styles.get(side).or(table.border_style),
         )
+    }
+
+    #[test]
+    fn mixed_row_grids_preserve_individual_borders_and_row_defaults() {
+        let solid = brc80(12, 0x01, 0);
+        let inner = brc80(6, 0x01, 0);
+        let mut row_defaults = vec![24];
+        for border in [solid, solid, solid, solid, inner, inner] {
+            row_defaults.extend_from_slice(&border);
+        }
+        let mut rows = Vec::new();
+        for bounds in [vec![0, 400], vec![0, 100, 300, 400], vec![0, 100, 400]] {
+            let mut row = row_with_bounds(&bounds);
+            let count = bounds.len() - 1;
+            let mut cells = vec![[[0; 4]; 4]; count];
+            if count == 3 {
+                // A direct dashed top and an explicit clear take precedence over defaults.
+                cells[1][0] = brc80(8, 0x07, 6);
+                cells[1][3] = [0xFF; 4];
+            }
+            let mut def = TableDef::parse(&tdef_with_tc80(&bounds, &cells)).unwrap();
+            assert!(def.apply_table_borders80(&row_defaults));
+            row.def = Some(def);
+            rows.push(row);
+        }
+        let table = build(rows).table;
+        let first = &table.rows[0].cells[0];
+        assert_eq!(first.col_span, 3);
+        assert_eq!(first.borders.top.unwrap().width_eighths, 12);
+        assert_eq!(first.borders.bottom.unwrap().width_eighths, 6);
+        assert_eq!(first.borders.left.unwrap().width_eighths, 12);
+        assert_eq!(first.borders.right.unwrap().width_eighths, 12);
+        let middle = &table.rows[1].cells[1];
+        assert_eq!(middle.borders.top.unwrap().style, "dashed");
+        assert_eq!(
+            middle.borders.top.unwrap().color,
+            Some(Color::rgb(255, 0, 0))
+        );
+        assert_eq!(middle.borders.right.unwrap().style, "none");
+        assert_eq!(middle.borders.left.unwrap().width_eighths, 6);
+        let last = &table.rows[2].cells[1];
+        assert_eq!(last.col_span, 2);
+        assert_eq!(last.borders.bottom.unwrap().width_eighths, 12);
+        assert_eq!(last.borders.left.unwrap().width_eighths, 6);
+        assert_eq!(last.borders.right.unwrap().width_eighths, 12);
+    }
+
+    #[test]
+    fn cell_borders_follow_horizontal_and_vertical_merge_perimeters() {
+        let top = brc80(4, 0x01, 0);
+        let bottom = brc80(12, 0x01, 0);
+        let left = brc80(6, 0x03, 0);
+        let right = brc80(8, 0x07, 0);
+        let mut first = TableDef::parse(&tdef_with_tc80(
+            &[0, 100, 200],
+            &[[top, left, top, top], [top, top, top, right]],
+        ))
+        .unwrap();
+        first.tcgrf = vec![F_VERT_RESTART, F_MERGED];
+        let mut second =
+            TableDef::parse(&tdef_with_tc80(&[0, 200], &[[top, left, bottom, right]])).unwrap();
+        second.tcgrf = vec![F_VERT_MERGE];
+        let table = build(vec![
+            RowBuild {
+                cells: vec![CellBuild::default(), CellBuild::default()],
+                def: Some(first),
+                header: false,
+            },
+            RowBuild {
+                cells: vec![CellBuild::default()],
+                def: Some(second),
+                header: false,
+            },
+        ])
+        .table;
+        let cell = &table.rows[0].cells[0];
+        assert_eq!((cell.col_span, cell.row_span), (2, 2));
+        assert_eq!(cell.borders.top.unwrap().width_eighths, 4);
+        assert_eq!(cell.borders.bottom.unwrap().width_eighths, 12);
+        assert_eq!(cell.borders.left.unwrap().style, "double");
+        assert_eq!(cell.borders.right.unwrap().style, "dashed");
+        assert!(table.rows[1].cells.is_empty());
     }
 
     #[test]

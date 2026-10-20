@@ -40,6 +40,7 @@ pub(crate) mod fields;
 mod numbering;
 mod revisions;
 mod styles;
+mod theme;
 mod xml_text;
 
 pub(crate) fn parse_fields(xml: &str) -> Vec<Field> {
@@ -265,6 +266,8 @@ pub(crate) struct DocxState {
     /// The **body-only** model (no footnote/endnote blocks). `Document::model()`
     /// re-appends `notes` for the read view; the lossy model is read/render only.
     pub model: DocModel,
+    /// Browser-only source layout: TOC fields retain saved text and run formatting.
+    source_preview_layout: Option<SourcePreviewLayout>,
     /// Footnote/endnote blocks, kept separate from `model.blocks` (their `.docx`
     /// parts are preserved on save, never inlined into the body).
     pub notes: Vec<Block>,
@@ -283,15 +286,14 @@ pub(crate) struct DocxState {
     pub pagination_hints: Vec<crate::model::PaginationHint>,
     /// Source-only exact/minimum line spacing aligned to body model blocks.
     pub line_spacing_hints: Vec<Option<crate::model::LineSpacingHint>>,
-    /// Renderer-only exact/minimum line spacing aligned to `notes` blocks.
-    #[cfg(feature = "render")]
+    /// Preview/render exact/minimum line spacing aligned to `notes` blocks.
     pub note_line_spacing_hints: Vec<Option<crate::model::LineSpacingHint>>,
-    /// Renderer-only explicit paragraph tab stops aligned to `notes` blocks.
-    #[cfg(feature = "render")]
+    /// Preview/render explicit paragraph tab stops aligned to `notes` blocks.
     pub note_tab_stops: Vec<Vec<crate::model::TabStop>>,
-    /// Renderer-only table-cell tab stops aligned to `notes` blocks.
-    #[cfg(feature = "render")]
+    /// Preview/render table-cell tab stops aligned to `notes` blocks.
     pub note_table_cell_tab_stops: Vec<crate::model::TableCellTabStopHints>,
+    /// Preview/render nested-table controls aligned to `notes` blocks.
+    pub note_table_nested_pagination: Vec<crate::model::TableCellNestedPaginationHints>,
     /// Source-only exact/minimum line spacing for section running surfaces.
     pub running_line_spacing_hints: Vec<crate::model::RunningSurfaceLineSpacingHints>,
     /// Source-only pagination controls for section running surfaces.
@@ -338,9 +340,9 @@ pub(crate) struct DocxState {
     pub table_nested_pagination: Vec<crate::model::TableCellNestedPaginationHints>,
     /// Source-only resolved table-cell paragraph tab stops aligned to body model blocks.
     pub table_cell_tab_stops: Vec<crate::model::TableCellTabStopHints>,
-    /// Renderer-only document default tab interval from `word/settings.xml`.
-    #[cfg(feature = "render")]
+    /// Preview/render document default tab interval from `word/settings.xml`.
     pub default_tab_stop_pt: Option<f32>,
+    pub typography: crate::PreviewTypography,
     /// Exact running header/footer records parsed from referenced `.docx` parts.
     pub header_footers: Vec<HeaderFooter>,
     /// Core metadata parsed from `docProps/core.xml`.
@@ -370,8 +372,102 @@ impl std::fmt::Debug for DocxState {
     }
 }
 
+/// Compact source read view. It deliberately owns no OPC parts or field inventory.
+#[derive(Clone)]
+pub(crate) struct SourcePreviewLayout {
+    pub model: DocModel,
+    pub notes: Vec<Block>,
+    pub pagination_hints: Vec<crate::model::PaginationHint>,
+    pub line_spacing_hints: Vec<Option<crate::model::LineSpacingHint>>,
+    pub table_cell_pagination: Vec<crate::model::TableCellPaginationHints>,
+    pub table_cell_line_spacing: Vec<crate::model::TableCellLineSpacingHints>,
+    pub tab_stops: Vec<Vec<crate::model::TabStop>>,
+    pub table_cell_tab_stops: Vec<crate::model::TableCellTabStopHints>,
+    pub table_nested_pagination: Vec<crate::model::TableCellNestedPaginationHints>,
+    pub note_line_spacing_hints: Vec<Option<crate::model::LineSpacingHint>>,
+    pub note_tab_stops: Vec<Vec<crate::model::TabStop>>,
+    pub note_table_cell_tab_stops: Vec<crate::model::TableCellTabStopHints>,
+    pub note_table_nested_pagination: Vec<crate::model::TableCellNestedPaginationHints>,
+    pub running_line_spacing_hints: Vec<crate::model::RunningSurfaceLineSpacingHints>,
+    pub running_pagination_hints: Vec<crate::model::RunningSurfacePaginationHints>,
+    pub running_tab_stops: Vec<crate::model::RunningSurfaceTabStopHints>,
+    pub running_table_cell_tab_stops: Vec<crate::model::RunningSurfaceTableCellTabStopHints>,
+    pub running_table_layout_hints: Vec<crate::model::RunningSurfaceTableLayoutHints>,
+    pub running_surface_distances: Vec<crate::model::RunningSurfaceDistanceHints>,
+    pub default_tab_stop_pt: Option<f32>,
+    pub typography: crate::PreviewTypography,
+    pub section_break_types: Vec<Option<&'static str>>,
+    pub table_row_pagination: Vec<Vec<crate::model::TableRowPaginationHint>>,
+    pub section_column_gap_pt: Vec<Option<f32>>,
+    pub section_column_layouts: Vec<Option<crate::model::SectionColumnLayoutHints>>,
+    pub section_column_separators: Vec<bool>,
+    pub section_column_rtl: Vec<bool>,
+    pub final_section_column_gap_pt: Option<f32>,
+    pub final_section_column_layout: Option<crate::model::SectionColumnLayoutHints>,
+    pub final_section_column_separator: bool,
+    pub final_section_column_rtl: bool,
+    pub column_break_offsets: Vec<Vec<usize>>,
+}
+
+impl SourcePreviewLayout {
+    fn from_state(state: &DocxState) -> Self {
+        Self {
+            model: state.model.clone(),
+            notes: state.notes.clone(),
+            pagination_hints: state.pagination_hints.clone(),
+            line_spacing_hints: state.line_spacing_hints.clone(),
+            table_cell_pagination: state.table_cell_pagination.clone(),
+            table_cell_line_spacing: state.table_cell_line_spacing.clone(),
+            tab_stops: state.tab_stops.clone(),
+            table_cell_tab_stops: state.table_cell_tab_stops.clone(),
+            table_nested_pagination: state.table_nested_pagination.clone(),
+            note_line_spacing_hints: state.note_line_spacing_hints.clone(),
+            note_tab_stops: state.note_tab_stops.clone(),
+            note_table_cell_tab_stops: state.note_table_cell_tab_stops.clone(),
+            note_table_nested_pagination: state.note_table_nested_pagination.clone(),
+            running_line_spacing_hints: state.running_line_spacing_hints.clone(),
+            running_pagination_hints: state.running_pagination_hints.clone(),
+            running_tab_stops: state.running_tab_stops.clone(),
+            running_table_cell_tab_stops: state.running_table_cell_tab_stops.clone(),
+            running_table_layout_hints: state.running_table_layout_hints.clone(),
+            running_surface_distances: state.running_surface_distances.clone(),
+            default_tab_stop_pt: state.default_tab_stop_pt,
+            typography: state.typography,
+            section_break_types: preview_section_break_types(state),
+            table_row_pagination: state.table_row_pagination.clone(),
+            section_column_gap_pt: state.section_column_gap_pt.clone(),
+            section_column_layouts: state.section_column_layouts.clone(),
+            section_column_separators: state.section_column_separators.clone(),
+            section_column_rtl: state.section_column_rtl.clone(),
+            final_section_column_gap_pt: state.final_section_column_gap_pt,
+            final_section_column_layout: state.final_section_column_layout.clone(),
+            final_section_column_separator: state.final_section_column_separator,
+            final_section_column_rtl: state.final_section_column_rtl,
+            column_break_offsets: state.column_break_offsets.clone(),
+        }
+    }
+}
+
 /// Open and decode a `.docx` from its raw bytes.
 pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
+    let mut state = open_with_source_toc_cache(bytes, false)?;
+    if state.fields.iter().any(|field| matches!(field.kind.as_str(), "TOC" | "PAGE" | "NUMPAGES" | "SECTIONPAGES")) {
+        // Preview keeps cached TOCs and the identity of dynamic page fields.
+        // The ordinary read/export model retains deterministic field evaluation.
+        let source = open_with_source_toc_cache(bytes, true)?;
+        state.source_preview_layout = Some(SourcePreviewLayout::from_state(&source));
+    }
+    Ok(state)
+}
+
+pub(crate) fn source_preview_layout(state: &DocxState) -> SourcePreviewLayout {
+    state
+        .source_preview_layout
+        .clone()
+        .unwrap_or_else(|| SourcePreviewLayout::from_state(state))
+}
+
+fn open_with_source_toc_cache(bytes: &[u8], preserve_source_toc_cache: bool) -> Result<DocxState> {
     // Bound the entry count BEFORE `ZipArchive::new` (which eagerly collects the whole
     // central directory) — same authoritative limit the package layer enforces, so a
     // hostile archive can't amplify on the read path either.
@@ -426,8 +522,8 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         .as_deref()
         .map(fields::note_numbering_from_settings)
         .unwrap_or_default();
-    #[cfg(feature = "render")]
     let default_tab_stop_pt = settings_xml.as_deref().and_then(parse_default_tab_stop_pt);
+    let typography = settings_xml.as_deref().map(crate::typography::from_settings).unwrap_or_default();
     let document_properties = DocumentPropertyRefs {
         core: &core_properties,
         custom: &custom_property_fields,
@@ -527,6 +623,7 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         extended_properties: &extended_properties,
         file_size_bytes: Some(bytes.len()),
         preserve_note_local_fields: false,
+        preserve_source_toc_cache,
         ref_field_cursor: Default::default(),
         page_field_cursor: Default::default(),
         last_page_field_unsupported_display_format: Default::default(),
@@ -576,6 +673,7 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         numbering: &numbering,
         properties: document_properties,
         preserve_legacy_form_cache,
+        preserve_source_toc_cache,
     };
     let mut note_part = read_notes(
         &mut zip,
@@ -595,14 +693,14 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
     note_part
         .source_entries
         .append(&mut endnote_part.source_entries);
-    #[cfg(feature = "render")]
     note_part.line_spacing.extend(endnote_part.line_spacing);
-    #[cfg(feature = "render")]
     note_part.tab_stops.extend(endnote_part.tab_stops);
-    #[cfg(feature = "render")]
     note_part
         .table_cell_tab_stops
         .extend(endnote_part.table_cell_tab_stops);
+    note_part
+        .table_nested_pagination
+        .extend(endnote_part.table_nested_pagination);
     note_part.records.append(&mut endnote_part.records);
     note_part.revisions.extend(endnote_part.revisions);
     note_part
@@ -665,6 +763,7 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         &numbering,
         document_properties,
         preserve_legacy_form_cache,
+        preserve_source_toc_cache,
     );
     floating_shapes.extend(header_footer_floating_shapes);
     text_boxes.extend(header_footer_text_boxes);
@@ -833,6 +932,7 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
     let final_section_columns = body::scan_final_section_column_hints(&doc_xml);
     Ok(DocxState {
         model,
+        source_preview_layout: None,
         notes: note_part.blocks,
         fresh_conversion_notes,
         text,
@@ -845,12 +945,10 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         floating_shapes,
         pagination_hints,
         line_spacing_hints,
-        #[cfg(feature = "render")]
         note_line_spacing_hints: note_part.line_spacing,
-        #[cfg(feature = "render")]
         note_tab_stops: note_part.tab_stops,
-        #[cfg(feature = "render")]
         note_table_cell_tab_stops: note_part.table_cell_tab_stops,
+        note_table_nested_pagination: note_part.table_nested_pagination,
         running_line_spacing_hints,
         running_pagination_hints,
         running_tab_stops,
@@ -874,8 +972,8 @@ pub(crate) fn open(bytes: &[u8]) -> Result<DocxState> {
         table_cell_line_spacing,
         table_nested_pagination,
         table_cell_tab_stops,
-        #[cfg(feature = "render")]
         default_tab_stop_pt,
+        typography,
         header_footers,
         core_properties,
         fields,
@@ -1014,6 +1112,7 @@ struct PartParseEnv<'a> {
     numbering: &'a numbering::Numbering,
     properties: DocumentPropertyRefs<'a>,
     preserve_legacy_form_cache: bool,
+    preserve_source_toc_cache: bool,
 }
 
 fn read_headers_footers(
@@ -1024,12 +1123,14 @@ fn read_headers_footers(
     numbering: &numbering::Numbering,
     properties: DocumentPropertyRefs<'_>,
     preserve_legacy_form_cache: bool,
+    preserve_source_toc_cache: bool,
 ) -> HeaderFooterRead {
     let part_env = PartParseEnv {
         styles,
         numbering,
         properties,
         preserve_legacy_form_cache,
+        preserve_source_toc_cache,
     };
     let section_refs = body::scan_hf_ref_sections(doc_xml);
     let mut sections = Vec::with_capacity(section_refs.len());
@@ -1519,6 +1620,7 @@ fn read_hf_parts(
         numbering,
         properties,
         preserve_legacy_form_cache,
+        preserve_source_toc_cache,
     } = env;
     let mut seen_blocks = std::collections::HashSet::new();
     let mut seen_records = std::collections::HashSet::new();
@@ -1650,6 +1752,7 @@ fn read_hf_parts(
             extended_properties: properties.extended,
             file_size_bytes: properties.file_size_bytes,
             preserve_note_local_fields: false,
+            preserve_source_toc_cache,
             ref_field_cursor: Default::default(),
             page_field_cursor: Default::default(),
             last_page_field_unsupported_display_format: Default::default(),
@@ -1900,12 +2003,10 @@ fn header_footer_kind(part_kind: HeaderFooterPartKind, type_name: &str) -> Heade
 struct NotePartRead {
     blocks: Vec<Block>,
     source_entries: Vec<NoteSourceEntry>,
-    #[cfg(feature = "render")]
     line_spacing: Vec<Option<crate::model::LineSpacingHint>>,
-    #[cfg(feature = "render")]
     tab_stops: Vec<Vec<crate::model::TabStop>>,
-    #[cfg(feature = "render")]
     table_cell_tab_stops: Vec<crate::model::TableCellTabStopHints>,
+    table_nested_pagination: Vec<crate::model::TableCellNestedPaginationHints>,
     records: Vec<Note>,
     comment_anchors: HashMap<String, TextAnchor>,
     revisions: Vec<Revision>,
@@ -1934,6 +2035,7 @@ fn read_notes(
         numbering,
         properties,
         preserve_legacy_form_cache,
+        preserve_source_toc_cache,
     } = env;
     let Some(xml) = part(zip, name) else {
         return NotePartRead::default();
@@ -2038,6 +2140,7 @@ fn read_notes(
         extended_properties: properties.extended,
         file_size_bytes: properties.file_size_bytes,
         preserve_note_local_fields: true,
+        preserve_source_toc_cache,
         ref_field_cursor: Default::default(),
         page_field_cursor: Default::default(),
         last_page_field_unsupported_display_format: Default::default(),
@@ -2128,12 +2231,10 @@ fn read_notes(
     NotePartRead {
         blocks,
         source_entries,
-        #[cfg(feature = "render")]
         line_spacing: layout_hints.line_spacing,
-        #[cfg(feature = "render")]
         tab_stops: layout_hints.tab_stops,
-        #[cfg(feature = "render")]
         table_cell_tab_stops: layout_hints.table_cell_tabs,
+        table_nested_pagination: layout_hints.table_nested,
         records,
         comment_anchors,
         revisions,
@@ -4567,7 +4668,6 @@ fn parse_document_id(xml: &str) -> Option<String> {
     None
 }
 
-#[cfg(any(feature = "render", test))]
 fn parse_default_tab_stop_pt(xml: &str) -> Option<f32> {
     let mut r = Reader::from_str(xml);
     loop {
@@ -4630,6 +4730,34 @@ const MAX_TOTAL_MEDIA: u64 = 256 << 20;
 /// Read a ZIP entry to a UTF-8 string, if present — bounded to guard against a
 /// zip bomb (a tiny entry that decompresses to gigabytes).
 fn part(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
+    let s = raw_part(zip, name)?;
+    if !name.starts_with("word/") || !(s.contains("themeFill") || s.contains("themeColor") || s.contains("\"solid\"")) {
+        return Some(s);
+    }
+    // Resolve only the read view. The retained OPC package remains byte-for-byte
+    // source material for package-preserving save and later edits.
+    let theme_path = raw_part(zip, "word/_rels/document.xml.rels")
+        .and_then(|rels| {
+            let mut reader = Reader::from_str(&rels);
+            loop {
+                match reader.read_event() {
+                    Ok(Event::Empty(e)) | Ok(Event::Start(e)) if local(e.name().as_ref()) == b"Relationship" => {
+                        if attr_local(&e, b"Type").is_some_and(|kind| kind.ends_with("/theme"))
+                            && attr_local(&e, b"TargetMode").as_deref() != Some("External") {
+                            break attr_local(&e, b"Target").map(|target| crate::opc::resolve_rel_target("word/document.xml", &target));
+                        }
+                    }
+                    Ok(Event::Eof) | Err(_) => break None,
+                    _ => {}
+                }
+            }
+        }).unwrap_or_else(|| "word/theme/theme1.xml".into());
+    let theme = raw_part(zip, &theme_path).unwrap_or_default();
+    let settings = raw_part(zip, "word/settings.xml").unwrap_or_default();
+    Some(theme::resolve(&s, &theme, &settings))
+}
+
+fn raw_part(zip: &mut zip::ZipArchive<std::io::Cursor<&[u8]>>, name: &str) -> Option<String> {
     let f = zip.by_name(name).ok()?;
     if f.size() > MAX_XML_PART {
         return None;
@@ -4772,6 +4900,7 @@ fn read_media(
                         height_px,
                         rotation_degrees: None,
                         floating_offset_emu: None,
+                        drawing_layout: None,
                     },
                 );
                 continue;
@@ -4801,6 +4930,7 @@ fn read_media(
                     height_px: Some(raster.height_px),
                     rotation_degrees: None,
                     floating_offset_emu: None,
+                    drawing_layout: None,
                 },
             );
         }
@@ -5041,6 +5171,28 @@ fn flatten_header_footer_surfaces(model: &DocModel, out: &mut String) {
 
 fn package_text_part(package: &crate::opc::Package, name: &str) -> Option<String> {
     String::from_utf8(package.part(name)?).ok()
+}
+
+/// Read-only projection of source section types omitted by the public model.
+/// A count mismatch is discarded rather than attaching hints to another section.
+pub(crate) fn preview_section_break_types(state: &DocxState) -> Vec<Option<&'static str>> {
+    let Some(xml) = package_text_part(&state.package, "word/document.xml") else {
+        return Vec::new();
+    };
+    let refs = body::scan_hf_ref_sections(&xml);
+    let count = state
+        .model
+        .blocks
+        .iter()
+        .filter(|block| matches!(block, Block::SectionBreak(_)))
+        .count();
+    if refs.len() != count + 1 {
+        return Vec::new();
+    }
+    refs.into_iter()
+        .take(count)
+        .map(|refs| refs.break_type)
+        .collect()
 }
 
 pub(crate) fn main_text_with_revision_view(state: &DocxState, view: crate::RevisionView) -> String {

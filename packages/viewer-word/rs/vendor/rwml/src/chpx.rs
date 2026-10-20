@@ -61,6 +61,9 @@ const SPRM_C_KUL: u16 = 0x2A3E; // underline kind (0 = none)
 const SPRM_C_PIC_LOCATION: u16 = 0x6A03; // fcPic into the Data stream (4-byte)
 const SPRM_C_HPS: u16 = 0x4A43; // font size, half-points (2-byte)
 const SPRM_C_RG_FTC0: u16 = 0x4A4F; // font index into SttbfFfn (2-byte)
+const SPRM_C_RG_FTC1: u16 = 0x4A50; // East Asian font
+const SPRM_C_RG_FTC2: u16 = 0x4A51; // other Unicode font
+const SPRM_C_IDCT_HINT: u16 = 0x286F; // font selection for ambiguous characters
 const SPRM_C_MAJORITY: u16 = 0xCA47; // conditional reset to paragraph style
 const SPRM_C_ISS: u16 = 0x2A48; // 0 normal, 1 superscript, 2 subscript
 const SPRM_C_CV: u16 = 0x6870; // 24-bit color COLORREF (4-byte)
@@ -139,6 +142,10 @@ pub(crate) struct Chp {
     /// Font index into `SttbfFfn` (`sprmCRgFtc0`), resolved to a name by the
     /// assembler; `None` = inherit.
     pub ftc: Option<u16>,
+    pub ftc_east_asia: Option<u16>,
+    pub ftc_other: Option<u16>,
+    pub font_hint: Option<u8>,
+    pub character_style: Option<u16>,
     /// Text color (`sprmCCv` 24-bit, or legacy `sprmCIco` palette), if set.
     pub color: Option<Color>,
     /// Highlight Ico (`sprmCHighlight`), including explicit clear (`0`).
@@ -157,6 +164,36 @@ pub(crate) struct Chp {
 }
 
 impl Chp {
+    /// Inherit only typography. Other legacy character effects retain their
+    /// existing direct-formatting semantics until their style toggles are modeled.
+    pub(crate) fn inherit_typography(mut self, base: Chp) -> Self {
+        self.size_half_pt = self.size_half_pt.or(base.size_half_pt);
+        self.ftc = self.ftc.or(base.ftc);
+        self.ftc_east_asia = self.ftc_east_asia.or(base.ftc_east_asia);
+        self.ftc_other = self.ftc_other.or(base.ftc_other);
+        self.font_hint = self.font_hint.or(base.font_hint);
+        self
+    }
+
+    pub(crate) fn font_for(&self, unit: u16) -> Option<u16> {
+        let east_asian = matches!(unit, 0x1100..=0x11FF | 0x2E80..=0xA4CF | 0xAC00..=0xD7AF
+            | 0xF900..=0xFAFF | 0xFE10..=0xFE6F | 0xFF00..=0xFFEF);
+        let ambiguous = matches!(unit, 0x0020 | 0x00A0 | 0x2000..=0x206F);
+        if east_asian || ambiguous && self.font_hint == Some(1) {
+            self.ftc_east_asia.or(self.ftc)
+        } else if unit <= 0x007F {
+            self.ftc
+        } else {
+            self.ftc_other.or(self.ftc)
+        }
+    }
+
+    fn reset_typography(&mut self) {
+        self.size_half_pt = None;
+        self.ftc = None;
+        self.ftc_east_asia = None;
+        self.ftc_other = None;
+    }
     /// Apply the bounded literal character-toggle subset of a PCD `Prm0`.
     ///
     /// Direct character formatting appends this modifier after CHPX, so a
@@ -668,8 +705,17 @@ fn scan_grpprl(gp: &[u8]) -> Chp {
             SPRM_C_F_BIDI => apply_direct_toggle(&mut chp.rtl, operand[0]),
             SPRM_C_KUL => chp.underline = operand.first().copied().unwrap_or(0) != 0,
             SPRM_C_PIC_LOCATION => picloc = u32le(operand, 0),
-            SPRM_C_HPS => chp.size_half_pt = u16le(operand, 0),
+            SPRM_C_HPS => {
+                if let Some(size) = u16le(operand, 0).filter(|size| (2..=3276).contains(size)) {
+                    chp.size_half_pt = Some(size);
+                }
+            }
             SPRM_C_RG_FTC0 => chp.ftc = u16le(operand, 0),
+            SPRM_C_RG_FTC1 => chp.ftc_east_asia = u16le(operand, 0),
+            SPRM_C_RG_FTC2 => chp.ftc_other = u16le(operand, 0),
+            SPRM_C_IDCT_HINT if matches!(operand[0], 0..=2 | 0xFF) => {
+                chp.font_hint = Some(operand[0])
+            }
             SPRM_C_HIGHLIGHT => {
                 let value = operand[0];
                 if value <= 16 {
@@ -690,11 +736,17 @@ fn scan_grpprl(gp: &[u8]) -> Chp {
             // These operators make the properties below style-derived. MS-DOC
             // explicitly preserves right-to-left layout across them.
             SPRM_C_ISTD | SPRM_C_ISTD_PERMUTE | SPRM_C_MAJORITY => {
+                if sprm == SPRM_C_ISTD {
+                    chp.reset_typography();
+                    chp.character_style = u16le(operand, 0);
+                }
                 chp.vert_align = None;
                 chp.small_caps = None;
                 chp.caps = None;
             }
             SPRM_C_PLAIN if operand[0] == 0 => {
+                chp.reset_typography();
+                chp.character_style = None;
                 chp.vert_align = None;
                 chp.small_caps = None;
                 chp.caps = None;
@@ -718,6 +770,26 @@ fn scan_grpprl(gp: &[u8]) -> Chp {
     // A picture run sets both fSpec and a picture location.
     chp.pic = if fspec { picloc } else { None };
     chp
+}
+
+/// Style UPX records must be structurally complete; a truncated tail must not
+/// contribute partial inherited typography.
+pub(crate) fn scan_style_typography(gp: &[u8]) -> Option<Chp> {
+    let mut offset = 0;
+    while offset < gp.len() {
+        let sprm = u16le(gp, offset)?;
+        let start = offset + 2;
+        let end = start.checked_add(operand_len(sprm, gp, start)?)?;
+        gp.get(start..end)?;
+        if matches!(
+            sprm,
+            SPRM_C_ISTD | SPRM_C_ISTD_PERMUTE | SPRM_C_PLAIN | SPRM_C_MAJORITY
+        ) {
+            return None;
+        }
+        offset = end;
+    }
+    Some(scan_grpprl(gp))
 }
 
 fn apply_direct_toggle(state: &mut Option<bool>, operand: u8) {
@@ -746,6 +818,46 @@ fn operand_len(sprm: u16, data: &[u8], op: usize) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typography_preserves_script_fonts_and_direct_overrides() {
+        let base = scan_style_typography(&[
+            0x43, 0x4a, 21, 0, 0x4f, 0x4a, 0, 0, 0x50, 0x4a, 1, 0, 0x51, 0x4a, 2, 0, 0x6f, 0x28, 1,
+        ])
+        .unwrap();
+        let direct = scan_grpprl(&[0x43, 0x4a, 28, 0]).inherit_typography(base);
+        assert_eq!(direct.size_half_pt, Some(28));
+        assert_eq!(direct.font_for('A' as u16), Some(0));
+        assert_eq!(direct.font_for('中' as u16), Some(1));
+        assert_eq!(direct.font_for(' ' as u16), Some(1));
+        assert_eq!(direct.font_for('Ω' as u16), Some(2));
+        assert_eq!(
+            scan_grpprl(&[0x43, 0x4a, 0xff, 0xff])
+                .inherit_typography(base)
+                .size_half_pt,
+            Some(21)
+        );
+        assert!(scan_style_typography(&[0x43, 0x4a, 21]).is_none());
+    }
+
+    #[test]
+    fn style_and_plain_resets_preserve_font_hint_and_source_order() {
+        let direct = [0x43, 0x4a, 28, 0, 0x50, 0x4a, 2, 0, 0x6f, 0x28, 1];
+        let mut bytes = direct.to_vec();
+        bytes.extend([0x30, 0x4a, 3, 0]);
+        let style = scan_grpprl(&bytes);
+        assert_eq!(style.character_style, Some(3));
+        assert_eq!(style.size_half_pt, None);
+        assert_eq!(style.ftc_east_asia, None);
+        assert_eq!(style.font_hint, Some(1));
+        bytes.extend([0x43, 0x4a, 24, 0]);
+        assert_eq!(scan_grpprl(&bytes).size_half_pt, Some(24));
+        bytes.extend([0x33, 0x2a, 0]);
+        let plain = scan_grpprl(&bytes);
+        assert_eq!(plain.character_style, None);
+        assert_eq!(plain.size_half_pt, None);
+        assert_eq!(plain.font_hint, Some(1));
+    }
 
     const BOLD_ON: &[u8] = &[0x35, 0x08, 0x01];
     const ITALIC_ON: &[u8] = &[0x36, 0x08, 0x01];

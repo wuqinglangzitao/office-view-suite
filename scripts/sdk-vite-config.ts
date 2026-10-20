@@ -1,9 +1,20 @@
+import { readFileSync } from 'node:fs';
 import type { UserConfig } from '../packages/viewer-core/node_modules/vite';
 
 export function sdkConfig(format?: string): UserConfig {
   return {
     base: './',
     publicDir: false,
+    plugins: [{
+      name: 'sdk-project-license',
+      generateBundle() {
+        this.emitFile({
+          type: 'asset',
+          fileName: 'LICENSE',
+          source: readFileSync(new URL('../LICENSE', import.meta.url), 'utf8'),
+        });
+      },
+    }],
     // Preserve the asset boundary when a consuming Vite build processes this
     // library again (the small classic PDF worker must not become a data URL).
     experimental: {

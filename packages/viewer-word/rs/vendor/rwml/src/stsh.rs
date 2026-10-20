@@ -14,6 +14,7 @@
 //! Reference: [MS-DOC] 2.9.271 (STSH), 2.9.272 (STSHI), 2.9.135 (LPStd),
 //! 2.9.270 (STD), 2.9.270.1 (StdfBase), 2.9.276 (sti).
 
+use crate::chpx::{scan_style_typography, Chp};
 use crate::papx::{
     scan_paragraph_style_overrides, ParagraphIndentOverrides, ParagraphLayoutOverrides,
     ParagraphPagination, ParagraphShading, ParagraphSpacingOverrides, ParagraphStyleOverrides,
@@ -34,10 +35,12 @@ struct StyleDescription {
 struct ParsedStyle {
     description: StyleDescription,
     paragraph: Option<ParsedParagraphStyleProperties>,
+    typography: Option<Chp>,
 }
 
 struct ParsedParagraphStyleProperties {
     properties: ParagraphStyleOverrides,
+    typography: Option<Chp>,
     #[cfg(any(feature = "docx", feature = "render"))]
     tab_stop_changes: Option<ParagraphTabStopChanges>,
 }
@@ -45,6 +48,8 @@ struct ParsedParagraphStyleProperties {
 /// The parsed stylesheet: per-`istd` heading, name, and bounded paragraph properties.
 #[derive(Debug, Default)]
 pub(crate) struct StyleSheet {
+    default_typography: Chp,
+    typography: Vec<Option<Chp>>,
     heading: Vec<Option<u8>>,
     names: Vec<String>,
     layout: Vec<ParagraphLayoutOverrides>,
@@ -57,6 +62,22 @@ pub(crate) struct StyleSheet {
 }
 
 impl StyleSheet {
+    pub(crate) fn typography(&self, istd: u16) -> Chp {
+        self.typography
+            .get(istd as usize)
+            .copied()
+            .flatten()
+            .unwrap_or_default()
+            .inherit_typography(self.default_typography)
+    }
+
+    pub(crate) fn character_typography(&self, istd: u16) -> Chp {
+        self.typography
+            .get(istd as usize)
+            .copied()
+            .flatten()
+            .unwrap_or_default()
+    }
     /// The heading level (1–9) for a paragraph style index, or `None` for body.
     pub(crate) fn heading_level(&self, istd: u16) -> Option<u8> {
         self.heading.get(istd as usize).copied().flatten()
@@ -111,6 +132,8 @@ impl StyleSheet {
     pub(crate) fn from_test_pagination(pagination: Vec<ParagraphPagination>) -> Self {
         let len = pagination.len();
         Self {
+            default_typography: Chp::default(),
+            typography: vec![None; len],
             heading: vec![None; len],
             names: vec![String::new(); len],
             layout: vec![ParagraphLayoutOverrides::default(); len],
@@ -143,10 +166,18 @@ impl StyleSheet {
             10 | 18 => cb_std_base as usize,
             _ => return empty,
         };
+        let header = stsh.get(2..2 + cb_stshi as usize).unwrap_or_default();
+        let default_typography = Chp {
+            ftc: u16le(header, 12),
+            ftc_east_asia: u16le(header, 14),
+            ftc_other: u16le(header, 16),
+            ..Chp::default()
+        };
 
         let mut p = 2usize.saturating_add(cb_stshi as usize);
         let mut descs: Vec<Option<StyleDescription>> = Vec::with_capacity(cstd as usize);
         let mut local_properties = Vec::with_capacity(cstd as usize);
+        let mut local_typography = Vec::with_capacity(cstd as usize);
         #[cfg(any(feature = "docx", feature = "render"))]
         let mut local_tab_stop_changes = Vec::with_capacity(cstd as usize);
         for _ in 0..cstd {
@@ -155,6 +186,7 @@ impl StyleSheet {
             if cb_std == 0 {
                 descs.push(None); // empty slot still consumes an istd index
                 local_properties.push(None);
+                local_typography.push(None);
                 #[cfg(any(feature = "docx", feature = "render"))]
                 local_tab_stop_changes.push(None);
                 continue;
@@ -166,6 +198,7 @@ impl StyleSheet {
             p += cb_std;
             let istd = descs.len() as u16;
             let parsed = parse_std(std, base_len, istd);
+            local_typography.push(parsed.as_ref().and_then(|style| style.typography));
             local_properties.push(
                 parsed
                     .as_ref()
@@ -184,6 +217,8 @@ impl StyleSheet {
 
         let n = descs.len();
         let mut heading = vec![None; n];
+        let mut typography = vec![None; n];
+        let mut typography_visited = vec![0u32; n];
         let mut names = vec![String::new(); n];
         let mut layout = vec![ParagraphLayoutOverrides::default(); n];
         let mut indent = vec![ParagraphIndentOverrides::default(); n];
@@ -205,6 +240,14 @@ impl StyleSheet {
         let mut shading_visited = vec![0u32; n];
         for istd in 0..n {
             let gen = istd as u32 + 1;
+            typography[istd] = resolve_typography(
+                &descs,
+                &local_typography,
+                istd,
+                &mut typography_visited,
+                gen,
+                0,
+            );
             heading[istd] = resolve_level(&descs, istd, &mut visited, gen, 0);
             layout[istd] =
                 resolve_layout(&descs, &local_properties, istd, &mut layout_visited, gen, 0)
@@ -244,6 +287,8 @@ impl StyleSheet {
             }
         }
         StyleSheet {
+            default_typography,
+            typography,
             heading,
             names,
             layout,
@@ -270,6 +315,21 @@ fn parse_std(std: &[u8], base_len: usize, istd: u16) -> Option<ParsedStyle> {
     } else {
         None
     };
+    let typography = if sgc == 1 {
+        paragraph
+            .as_ref()
+            .and_then(|paragraph| paragraph.typography)
+    } else if sgc == 2 && cupx == 1 && !has_original_style {
+        let grlp = std.get(grlp_offset..)?;
+        let (chpx, end) = read_lp_upx(grlp, 0)?;
+        if end == grlp.len() {
+            scan_style_typography(chpx)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     Some(ParsedStyle {
         description: StyleDescription {
             sti,
@@ -278,6 +338,7 @@ fn parse_std(std: &[u8], base_len: usize, istd: u16) -> Option<ParsedStyle> {
             name,
         },
         paragraph,
+        typography,
     })
 }
 
@@ -311,7 +372,8 @@ fn parse_paragraph_style_properties(
     #[cfg(any(feature = "docx", feature = "render"))]
     let tab_stop_changes = scan_paragraph_style_tab_changes(&papx[2..]);
 
-    let (_, next) = read_lp_upx(grlp, offset)?;
+    let (chpx, next) = read_lp_upx(grlp, offset)?;
+    let typography = scan_style_typography(chpx);
     offset = next;
     if cupx == 3 {
         let cb = u16le(grlp, offset)? as usize;
@@ -322,6 +384,7 @@ fn parse_paragraph_style_properties(
     }
     (offset == grlp.len()).then_some(ParsedParagraphStyleProperties {
         properties,
+        typography,
         #[cfg(any(feature = "docx", feature = "render"))]
         tab_stop_changes,
     })
@@ -351,6 +414,35 @@ fn read_lp_upx(data: &[u8], offset: usize) -> Option<(&[u8], usize)> {
 /// can't overflow the stack (the `visited` guard already breaks cycles; this caps a long
 /// acyclic chain, whose length is otherwise only bounded by the attacker-controlled count).
 const MAX_STYLE_BASE_DEPTH: usize = 64;
+
+fn resolve_typography(
+    descs: &[Option<StyleDescription>],
+    local: &[Option<Chp>],
+    istd: usize,
+    visited: &mut [u32],
+    gen: u32,
+    depth: usize,
+) -> Option<Chp> {
+    if depth > MAX_STYLE_BASE_DEPTH || istd >= descs.len() || visited[istd] == gen {
+        return None;
+    }
+    visited[istd] = gen;
+    let description = descs[istd].as_ref()?;
+    if !matches!(description.sgc, 1 | 2) {
+        return None;
+    }
+    let own = local[istd]?;
+    let base = if description.istd_base == 0x0FFF {
+        Chp::default()
+    } else {
+        let parent = description.istd_base as usize;
+        if descs.get(parent)?.as_ref()?.sgc != description.sgc {
+            return None;
+        }
+        resolve_typography(descs, local, parent, visited, gen, depth + 1)?
+    };
+    Some(own.inherit_typography(base))
+}
 
 /// Resolve a style's heading level: by built-in `sti`, then up the base chain,
 /// then by name. `visited` guards against base-style cycles; `depth` bounds an acyclic chain.
@@ -758,6 +850,57 @@ mod tests {
             }
         }
         stsh
+    }
+
+    #[test]
+    fn inherits_paragraph_character_upx_font_and_size() {
+        let mut normal = paragraph_style_std_grpprl(18, 0, 0x0FFF, "Normal", &[], false);
+        normal.truncate(normal.len() - 2);
+        let chpx = [0x43, 0x4a, 21, 0, 0x4f, 0x4a, 2, 0];
+        normal.extend_from_slice(&(chpx.len() as u16).to_le_bytes());
+        normal.extend_from_slice(&chpx);
+        let child = paragraph_style_std_grpprl(18, 1, 0, "Child", &[], false);
+        let bytes = stylesheet(18, &[Some(normal), Some(child)]);
+        let parsed = StyleSheet::parse(&bytes, 0, bytes.len());
+        assert_eq!(parsed.typography(1).size_half_pt, Some(21));
+        assert_eq!(parsed.typography(1).ftc, Some(2));
+    }
+
+    #[test]
+    fn typography_defaults_and_invalid_style_chains_are_bounded() {
+        let a = paragraph_style_std_grpprl(18, 0, 1, "A", &[], false);
+        let b = paragraph_style_std_grpprl(18, 1, 0, "B", &[], false);
+        let mut bytes = stylesheet(18, &[Some(a), Some(b)]);
+        bytes[14..20].copy_from_slice(&[2, 0, 3, 0, 4, 0]);
+        let parsed = StyleSheet::parse(&bytes, 0, bytes.len());
+        for index in [0, 1, 99] {
+            let typography = parsed.typography(index);
+            assert_eq!(typography.ftc, Some(2));
+            assert_eq!(typography.ftc_east_asia, Some(3));
+            assert_eq!(typography.ftc_other, Some(4));
+            assert_eq!(typography.size_half_pt, None);
+        }
+    }
+
+    #[test]
+    fn character_style_typography_remains_sparse() {
+        let mut style = paragraph_style_std_grpprl(18, 1, 0x0fff, "Character", &[], false);
+        style.truncate(style.len() - 6); // discard paragraph UPX and empty character UPX
+        style[2..4].copy_from_slice(&0xfff2u16.to_le_bytes());
+        style[4..6].copy_from_slice(&1u16.to_le_bytes());
+        style.extend_from_slice(&4u16.to_le_bytes());
+        style.extend_from_slice(&[0x50, 0x4a, 5, 0]);
+        let bytes = stylesheet(18, &[None, Some(style)]);
+        let parsed = StyleSheet::parse(&bytes, 0, bytes.len());
+        let run = parsed.character_typography(1).inherit_typography(Chp {
+            size_half_pt: Some(21),
+            ftc: Some(2),
+            ftc_east_asia: Some(3),
+            ..Chp::default()
+        });
+        assert_eq!(run.size_half_pt, Some(21));
+        assert_eq!(run.ftc, Some(2));
+        assert_eq!(run.ftc_east_asia, Some(5));
     }
 
     #[cfg(any(feature = "docx", feature = "render"))]

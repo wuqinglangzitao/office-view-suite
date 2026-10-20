@@ -22,6 +22,100 @@ fn docx_fixture(parts: &[(&str, &str)]) -> Vec<u8> {
     out
 }
 
+fn source_toc_fixture(content: &str) -> Vec<u8> {
+    let xml = format!(
+        r#"<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:pPr><w:outlineLvl w:val="0"/></w:pPr><w:r><w:t>Live heading</w:t></w:r></w:p>{content}</w:body></w:document>"#
+    );
+    docx_fixture(&[("word/document.xml", &xml)])
+}
+
+fn preview_paragraph_texts(doc: &Document) -> Vec<String> {
+    doc.model_with_layout_hints()
+        .model
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Paragraph(paragraph) => Some(paragraph.text()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn source_toc_preview_does_not_add_a_directory_without_a_field() {
+    let doc = Document::open(&source_toc_fixture("")).unwrap();
+    assert_eq!(preview_paragraph_texts(&doc), ["Live heading"]);
+}
+
+#[test]
+fn source_toc_preview_keeps_empty_simple_and_complex_caches_empty() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:fldSimple w:instr=" TOC \o &quot;1-1&quot; "/></w:p><w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-1" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    )).unwrap();
+    assert_eq!(preview_paragraph_texts(&doc), ["Live heading", "", ""]);
+    let generated = doc.model();
+    assert!(matches!(&generated.blocks[1], Block::Paragraph(p) if p.text() == "Live heading"));
+    assert!(matches!(&generated.blocks[2], Block::Paragraph(p) if p.text() == "Live heading"));
+}
+
+#[test]
+fn source_toc_preview_preserves_simple_cache_runs_and_formatting() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:fldSimple w:instr=" TOC \o &quot;1-1&quot; "><w:r><w:rPr><w:b/><w:rFonts w:ascii="Courier New"/></w:rPr><w:t>Saved entry</w:t></w:r><w:r><w:tab/></w:r><w:r><w:rPr><w:i/></w:rPr><w:t>12</w:t></w:r></w:fldSimple></w:p>"#,
+    )).unwrap();
+    let preview = doc.model_with_layout_hints();
+    let Block::Paragraph(paragraph) = &preview.model.blocks[1] else { panic!("paragraph") };
+    assert_eq!(paragraph.text(), "Saved entry\t12");
+    assert!(paragraph.runs[0].props.bold);
+    assert_eq!(paragraph.runs[0].props.font.as_deref(), Some("Courier New"));
+    assert!(paragraph.runs[2].props.italic);
+    assert!(matches!(&doc.model().blocks[1], Block::Paragraph(p) if p.text() == "Live heading"));
+}
+
+#[test]
+fn source_toc_preview_preserves_complex_cache_and_nested_page_ref() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-1" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:hyperlink w:anchor="chapter"><w:r><w:rPr><w:b/></w:rPr><w:t>Saved complex entry</w:t></w:r><w:r><w:tab/></w:r><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> PAGEREF chapter \h </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>24</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:hyperlink><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:bookmarkStart w:id="1" w:name="chapter"/><w:r><w:t>Chapter source</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#,
+    )).unwrap();
+    assert_eq!(preview_paragraph_texts(&doc), ["Live heading", "Saved complex entry\t24", "Chapter source"]);
+    let preview = doc.model_with_layout_hints();
+    let Block::Paragraph(paragraph) = &preview.model.blocks[1] else { panic!("paragraph") };
+    assert!(matches!(&paragraph.runs[0].field, FieldRole::Hyperlink { url } if url == "#chapter"));
+}
+
+#[test]
+fn source_toc_preview_preserves_complex_cache_without_nested_fields() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-1" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Saved entry</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>12</w:t></w:r><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p>"#,
+    )).unwrap();
+    assert_eq!(preview_paragraph_texts(&doc), ["Live heading", "Saved entry\t12"]);
+    assert!(matches!(&doc.model().blocks[1], Block::Paragraph(p) if p.text() == "Live heading"));
+}
+
+#[test]
+fn source_toc_preview_preserves_cross_paragraph_cache_and_nested_simple_page_ref() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:r><w:fldChar w:fldCharType="begin"/></w:r><w:r><w:instrText> TOC \o "1-1" </w:instrText></w:r><w:r><w:fldChar w:fldCharType="separate"/></w:r><w:r><w:t>First saved entry</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF chapter "><w:r><w:t>12</w:t></w:r></w:fldSimple></w:p><w:p><w:r><w:t>Second saved entry</w:t></w:r><w:r><w:tab/></w:r><w:fldSimple w:instr=" PAGEREF chapter "><w:r><w:t>13</w:t></w:r></w:fldSimple><w:r><w:fldChar w:fldCharType="end"/></w:r></w:p><w:p><w:bookmarkStart w:id="1" w:name="chapter"/><w:r><w:t>Chapter source</w:t></w:r><w:bookmarkEnd w:id="1"/></w:p>"#,
+    )).unwrap();
+    assert_eq!(preview_paragraph_texts(&doc), ["Live heading", "First saved entry\t12", "Second saved entry\t13", "Chapter source"]);
+}
+
+#[test]
+fn source_toc_preview_keeps_layout_hints_aligned_after_cached_page_breaks() {
+    let doc = Document::open(&source_toc_fixture(
+        r#"<w:p><w:fldSimple w:instr=" TOC \o &quot;1-1&quot; "><w:r><w:t>Saved entry</w:t></w:r><w:r><w:br w:type="page"/></w:r><w:r><w:t>Continued entry</w:t></w:r></w:fldSimple></w:p><w:p><w:pPr><w:keepNext/><w:spacing w:line="360" w:lineRule="exact"/></w:pPr><w:r><w:t>After directory</w:t></w:r></w:p>"#,
+    )).unwrap();
+    let preview = doc.model_with_layout_hints();
+    assert_eq!(preview.paragraphs.len(), preview.model.blocks.len());
+    assert!(preview.model.blocks.iter().any(|block| matches!(block, Block::PageBreak)));
+    let after = preview.model.blocks.iter().position(|block| {
+        matches!(block, Block::Paragraph(paragraph) if paragraph.text() == "After directory")
+    }).unwrap();
+    assert!(preview.paragraphs[after].keep_next);
+    assert_eq!(preview.paragraphs[after].line_spacing, Some(("exact", 18.0)));
+    assert!(preview.model.blocks.len() > doc.model().blocks.len());
+}
+
 fn unzip_parts(bytes: &[u8]) -> std::collections::BTreeMap<String, Vec<u8>> {
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes.to_vec())).unwrap();
     let mut parts = std::collections::BTreeMap::new();

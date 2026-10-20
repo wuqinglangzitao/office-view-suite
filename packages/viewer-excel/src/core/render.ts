@@ -164,9 +164,6 @@ function renderSheet(sheet: ExcelSheet, cache: VirtualCache, onError?: (error: E
   if (virtual) sheet = { ...sheet, highestRow: bounds.rows, highestCol: bounds.cols };
   const section = document.createElement('section');
   section.className = 'sheet';
-  const title = document.createElement('h2');
-  title.textContent = `📋 ${sheet.name}(${sheet.highestRow} 行 × ${sheet.highestCol} 列${sheet.merges.length ? `,合并 ${sheet.merges.length} 区` : ''})`;
-  section.appendChild(title);
 
   const wrap = document.createElement('div');
   wrap.className = 'grid-wrap';

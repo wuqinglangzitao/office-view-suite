@@ -2393,6 +2393,7 @@ impl<'a, 'l> Asm<'a, 'l> {
                 height_px: c.height_px,
                 rotation_degrees: c.rotation_degrees,
                 floating_offset_emu: c.floating_offset_emu,
+                drawing_layout: c.drawing_layout.clone(),
             };
         }
         self.img_budget -= n;
@@ -2438,6 +2439,13 @@ impl<'a, 'l> Asm<'a, 'l> {
 
         let mut chp = self.chpx.chp_at(fc);
         chp.apply_pcd_prm(prm, self.prm1_patches);
+        let paragraph_style = self.papx.style_at(fc).0;
+        let mut inherited = self.stylesheet.typography(paragraph_style);
+        if let Some(style) = chp.character_style {
+            inherited = self.stylesheet.character_typography(style).inherit_typography(inherited);
+        }
+        chp = chp.inherit_typography(inherited);
+        chp.ftc = chp.font_for(unit);
         chp.normalize_model_defaults();
         // Start a new run only when the (cheap) char properties change or after a flush
         // (e.g. a field mark, which is also the only place `active_url` changes). The owned

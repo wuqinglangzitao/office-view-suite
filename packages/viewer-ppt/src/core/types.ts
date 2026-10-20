@@ -21,12 +21,19 @@ export interface PptShape {
   y: number;
   w: number;
   h: number;
+  zOrder?: number;
+  /** Maps the local EMU box to slide coordinates, including ancestor transforms. */
+  transform?: PptTransform;
+  localWidthEmu?: number;
+  localHeightEmu?: number;
   rotation: number;
   flipH: boolean;
   flipV: boolean;
   shapeType?: string;
   fill?: string;
+  fillGradient?: PptGradient;
   stroke?: string;
+  strokeGradient?: PptGradient;
   strokeWidthEmu?: number;
   dash?: string;
   shadow?: PptShadow;
@@ -35,6 +42,7 @@ export interface PptShape {
   adjustments: number[];
   customPaths: PptCustomPath[];
   image?: string;
+  crop?: { left: number; top: number; right: number; bottom: number };
   paragraphs: PptPara[];
   align?: string;
   verticalAlign?: 'top' | 'center' | 'bottom';
@@ -46,6 +54,17 @@ export interface PptShape {
   wrapText: boolean;
   fontScale: number;
   lineSpacingReduction: number;
+  verticalText?: string;
+}
+
+export type PptTransform = [number, number, number, number, number, number];
+
+export interface PptGradient {
+  type: 'linear' | 'radial';
+  angle: number;
+  stops: { color: string; position: number }[];
+  centerX?: number;
+  centerY?: number;
 }
 
 export interface PptShadow {
@@ -85,10 +104,10 @@ export interface PptRun {
   bold: boolean;
   font?: string;
   italic: boolean;
-  /** ppt-rs 0.2.36 将 u="none" 读为 true(已知 bug),渲染层不使用 */
   underline: boolean;
   sizePt?: number;
   color?: string;
+  colorGradient?: PptGradient;
   shadow?: PptShadow;
 }
 
@@ -97,6 +116,13 @@ export interface PptTable {
   y: number;
   w: number;
   h: number;
+  zOrder?: number;
+  transform?: PptTransform;
+  localWidthEmu?: number;
+  localHeightEmu?: number;
+  rotation?: number;
+  flipH?: boolean;
+  flipV?: boolean;
   columns: number[];
   rows: PptTableRow[];
 }
@@ -108,14 +134,25 @@ export interface PptTableRow {
 
 export interface PptTableCell {
   text: string;
+  paragraphs?: PptPara[];
   colSpan: number;
   rowSpan: number;
   fill?: string;
   color?: string;
   fontSizePt?: number;
   align?: 'left' | 'center' | 'right' | 'justify';
+  verticalAlign?: 'top' | 'center' | 'bottom';
+  verticalText?: string;
+  isHeader?: boolean;
+  borders?: Partial<Record<'top' | 'right' | 'bottom' | 'left', PptBorder>>;
   marginLeftEmu: number;
   marginRightEmu: number;
   marginTopEmu: number;
   marginBottomEmu: number;
+}
+
+export interface PptBorder {
+  color?: string;
+  widthEmu: number;
+  dash?: string;
 }

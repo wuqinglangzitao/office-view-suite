@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::Reader;
 
+use super::fields::computed_run_symbol_char;
 use super::xml_text::{skip_alternate_content_branch, skip_subtree, AlternateContentBranchState};
 use super::{attr_local, attr_local_trimmed, attr_u32, attr_u8, local};
 
@@ -88,7 +89,25 @@ impl Numbering {
             if glyph.is_empty() || glyph.contains('%') {
                 return None;
             }
-            return Some(glyph.to_string());
+            return Some(
+                glyph
+                    .chars()
+                    .map(|ch| {
+                        let code = ch as u32;
+                        // Numbering uses the same legacy font codes as w:sym.
+                        // Already-Unicode markers must not be reduced to a byte.
+                        if code <= 0xff || (0xf000..=0xf0ff).contains(&code) {
+                            computed_run_symbol_char(
+                                lvl.marker_font.as_deref(),
+                                &format!("{code:X}"),
+                            )
+                            .unwrap_or(ch)
+                        } else {
+                            ch
+                        }
+                    })
+                    .collect(),
+            );
         }
         let pattern = if lvl.lvl_text.is_empty() {
             format!("%{}.", i + 1)
@@ -575,6 +594,42 @@ mod tests {
         let nb = parse(xml);
 
         assert_eq!(nb.marker_font("1", 0), Some("Wingdings"));
+    }
+
+    #[test]
+    fn bullet_levels_decode_legacy_symbol_codes_without_changing_unicode() {
+        let cases = [
+            ("Symbol", "\u{f0b7}", "•"),
+            ("Symbol", "\u{00b7}", "•"),
+            ("Wingdings", "\u{f0d8}", "➢"),
+            ("Wingdings", "\u{f06e}", "■"),
+            ("Wingdings", "\u{f0fc}", "✓"),
+            ("Symbol", "•", "•"),
+            ("Symbol", "○", "○"),
+            ("Symbol", "α", "α"),
+            ("Wingdings", "➢", "➢"),
+            ("Courier New", "o", "o"),
+            ("Arial", "\u{00b7}", "\u{00b7}"),
+            ("Custom Icons", "\u{f0b7}", "\u{f0b7}"),
+            ("Symbol", "\u{f041}•", "Α•"),
+            ("Symbol", "\u{e0b7}", "\u{e0b7}"),
+            ("Wingdings", "\u{f000}", "\u{f000}"),
+        ];
+        for (font, glyph, expected) in cases {
+            let xml = format!(
+                r#"<w:numbering><w:abstractNum w:abstractNumId="0">
+                <w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="{glyph}"/>
+                <w:rPr><w:rFonts w:ascii="{font}"/></w:rPr></w:lvl>
+                </w:abstractNum><w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num></w:numbering>"#
+            );
+            let nb = parse(&xml);
+            assert_eq!(
+                nb.label("1", 0, &mut [0; 9]).as_deref(),
+                Some(expected),
+                "font={font}, glyph={glyph:?}"
+            );
+            assert_eq!(nb.marker_font("1", 0), Some(font));
+        }
     }
 
     #[test]

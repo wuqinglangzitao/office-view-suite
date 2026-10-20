@@ -7,9 +7,8 @@ export const SHADOW_CSS = `
 .sheet-tab { flex: 0 0 auto; min-height: 34px; padding: 6px 14px; border: 0; border-right: 1px solid #d7dce1; border-bottom: 2px solid transparent; background: #eef1f4; color: #30363d; cursor: pointer; }
 .sheet-tab[aria-selected="true"] { background: #fff; border-bottom-color: #217346; color: #111; font-weight: 600; }
 .sheet[hidden] { display: none; }
-.sheet h2 { font-size: 15px; margin: 0 0 10px; color: #1f2328; }
 
-.grid-wrap { overflow: auto; max-height: 75vh; max-width: var(--office-viewer-viewport-width, none); box-sizing: border-box; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; }
+.grid-wrap { overflow: auto; max-height: 75vh; max-width: var(--office-viewer-viewport-width, none); box-sizing: border-box; background: #fff; border: 1px solid #d0d7de; border-radius: 0; }
 .grid { display: grid; gap: 0; width: max-content;
   border-left: 1px solid #e4e8ec; border-top: 1px solid #e4e8ec; }
 

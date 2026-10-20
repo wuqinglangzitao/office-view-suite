@@ -16,3 +16,6 @@ packages/*/src/wasm/
 packages/*/public/assets/
 output/
 fixtures/*/public/samples/
+fixtures/vue2-vite/public/office-assets/
+fixtures/vue2-vite/public/office-licenses/
+.omx/state/

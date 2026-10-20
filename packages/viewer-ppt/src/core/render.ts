@@ -1,5 +1,7 @@
 import { SHADOW_CSS } from './styles';
-import type { PptDoc, PptPara, PptShadow, PptShape, PptSlide, PptTable } from './types';
+import { presetPath } from './geometry';
+import { applyTextPaint, cssLineStyle, dashArray, gradientCss, paintEndpoint, svgPaint } from './paint';
+import type { PptDoc, PptPara, PptShadow, PptShape, PptSlide, PptTable, PptTransform } from './types';
 
 const SVG_NS = 'http://www.w3.org/2000/svg';
 let markerId = 0;
@@ -71,25 +73,26 @@ function renderSlide(slide: PptSlide, doc: PptDoc, textFits: (() => void)[]): HT
   const el = document.createElement('div');
   el.className = 'slide';
   el.style.aspectRatio = `${doc.slideWidthEmu} / ${doc.slideHeightEmu}`;
+  el.style.setProperty('--default-font-size', ptCqw(18, doc));
   if (slide.background) el.style.background = slide.background;
 
-  for (const shape of slide.shapes) {
-    el.appendChild(renderShape(shape, doc, textFits));
-  }
-
-  for (const table of slide.tables) {
-    el.appendChild(renderTable(table, doc));
+  const nodes = [
+    ...slide.shapes.map((shape, index) => ({ order: shape.zOrder ?? index, render: () => renderShape(shape, doc, textFits) })),
+    ...slide.tables.map((table, index) => ({ order: table.zOrder ?? slide.shapes.length + index, render: () => renderTable(table, doc) })),
+  ];
+  for (const node of nodes.sort((a, b) => a.order - b.order)) {
+    el.appendChild(node.render());
   }
   return el;
 }
 
 function renderShape(shape: PptShape, doc: PptDoc, textFits: (() => void)[]): HTMLElement | SVGSVGElement {
+  shape = physicalBox(shape);
   if (isConnector(shape)) return renderLine(shape, doc);
 
   const box = document.createElement('div');
   box.className = `shape shape-${shape.shapeType ?? 'rect'}`;
   position(box, shape, doc);
-  box.style.transform = transform(shape);
   if (shape.kind === 'shape') appendShapeGeometry(box, shape, doc);
   const padding = [
     cqw(shape.marginTopEmu, doc.slideWidthEmu),
@@ -105,19 +108,31 @@ function renderShape(shape: PptShape, doc: PptDoc, textFits: (() => void)[]): HT
   }
 
   if (shape.kind === 'picture' && shape.image) {
-    if (shape.fill) box.style.background = shape.fill;
-    applyStroke(box, shape);
+    const clip = pictureClip(shape);
+    if (shape.fillGradient) clip.style.background = gradientCss(shape.fillGradient);
+    else if (shape.fill) clip.style.background = shape.fill;
     const image = document.createElement('img');
     image.className = 'picture';
     image.src = shape.image;
     image.alt = '';
     image.draggable = false;
-    if (shape.shadow) image.style.filter = shadowFilter(shape.shadow, doc);
-    box.appendChild(image);
+    if (shape.crop) {
+      const width = Math.max(0.0001, 1 - shape.crop.left - shape.crop.right);
+      const height = Math.max(0.0001, 1 - shape.crop.top - shape.crop.bottom);
+      image.style.width = `${100 / width}%`;
+      image.style.height = `${100 / height}%`;
+      image.style.left = `${-shape.crop.left * 100 / width}%`;
+      image.style.top = `${-shape.crop.top * 100 / height}%`;
+    }
+    clip.appendChild(image);
+    if (shape.shadow) box.style.filter = shadowFilter(shape.shadow, doc);
+    box.appendChild(clip);
+    if (shape.stroke && shape.stroke !== 'transparent') appendShapeGeometry(box, { ...shape, fill: 'transparent', fillGradient: undefined, shadow: undefined }, doc);
   }
   const text = document.createElement('div');
   text.className = 'shape-text';
   text.style.padding = padding;
+  applyWritingMode(text, shape.verticalText);
   text.style.setProperty('--font-scale', `${shape.fontScale || 1}`);
   text.style.setProperty('--line-height', `${Math.max(0.1, 1 - (shape.lineSpacingReduction || 0))}`);
   for (const para of shape.paragraphs) {
@@ -142,37 +157,34 @@ function fitText(box: HTMLElement, text: HTMLElement, initialScale: number): voi
 function renderLine(shape: PptShape, doc: PptDoc): SVGSVGElement {
   const svg = document.createElementNS(SVG_NS, 'svg');
   svg.classList.add('shape', 'connector');
-  svg.style.inset = '0';
-  svg.style.width = '100%';
-  svg.style.height = '100%';
+  const local = !!shape.transform;
+  // Use the slide coordinate system for connectors, including zero-height or
+  // zero-width lines. Both line widths and arrowheads then scale uniformly.
+  svg.style.inset = '0'; svg.style.width = '100%'; svg.style.height = '100%';
   svg.setAttribute('viewBox', `0 0 ${doc.slideWidthEmu} ${doc.slideHeightEmu}`);
   svg.setAttribute('preserveAspectRatio', 'none');
   const path = document.createElementNS(SVG_NS, 'path');
-  path.setAttribute('d', connectorPath(shape));
+  path.setAttribute('d', connectorPath({ ...shape, x: 0, y: 0, flipH: local ? false : shape.flipH, flipV: local ? false : shape.flipV }));
+  path.setAttribute('transform', shape.transform ? `matrix(${shape.transform.join(' ')})`
+    : `translate(${shape.x} ${shape.y}) rotate(${shape.rotation} ${shape.w / 2} ${shape.h / 2})`);
   path.setAttribute('fill', 'none');
-  path.setAttribute('vector-effect', 'non-scaling-stroke');
-  path.setAttribute('stroke', shape.stroke ?? '#000');
-  path.setAttribute('stroke-width', `${strokePixels(shape)}`);
+  path.setAttribute('stroke', svgPaint(svg, shape.stroke ?? '#000', shape.strokeGradient, shape.w, shape.h, true));
+  path.setAttribute('stroke-width', String(shape.strokeWidthEmu ?? 12700));
   path.setAttribute('stroke-linecap', 'round');
   path.setAttribute('stroke-linejoin', 'round');
   if (shape.shadow) path.style.filter = shadowFilter(shape.shadow, doc);
-  if (shape.dash && shape.dash !== 'solid') path.setAttribute('stroke-dasharray', '5 4');
-  if (shape.rotation) {
-    path.setAttribute(
-      'transform',
-      `rotate(${shape.rotation} ${shape.x + shape.w / 2} ${shape.y + shape.h / 2})`,
-    );
-  }
+  const pattern = dashArray(shape.dash, shape.strokeWidthEmu ?? 12700);
+  if (pattern) path.setAttribute('stroke-dasharray', pattern);
 
   const defs = document.createElementNS(SVG_NS, 'defs');
   const id = ++markerId;
   if (shape.headEnd) {
-    const marker = createMarker(`ppt-head-${id}`, shape.headEnd, shape.stroke ?? '#000');
+    const marker = createMarker(`ppt-head-${id}`, shape.headEnd, paintEndpoint(shape.stroke, shape.strokeGradient, false), shape.strokeWidthEmu ?? 12700);
     defs.appendChild(marker);
     path.setAttribute('marker-start', `url(#ppt-head-${id})`);
   }
   if (shape.tailEnd) {
-    const marker = createMarker(`ppt-tail-${id}`, shape.tailEnd, shape.stroke ?? '#000');
+    const marker = createMarker(`ppt-tail-${id}`, shape.tailEnd, paintEndpoint(shape.stroke, shape.strokeGradient, true), shape.strokeWidthEmu ?? 12700);
     defs.appendChild(marker);
     path.setAttribute('marker-end', `url(#ppt-tail-${id})`);
   }
@@ -209,16 +221,16 @@ function connectorPath(shape: PptShape): string {
   }
 }
 
-function createMarker(id: string, type: string, color: string): SVGMarkerElement {
+function createMarker(id: string, type: string, color: string, strokeWidthEmu: number): SVGMarkerElement {
   const marker = document.createElementNS(SVG_NS, 'marker');
   marker.id = id;
   marker.setAttribute('viewBox', '0 0 10 10');
   marker.setAttribute('refX', '9');
   marker.setAttribute('refY', '5');
-  marker.setAttribute('markerWidth', '7');
-  marker.setAttribute('markerHeight', '7');
+  marker.setAttribute('markerWidth', String(strokeWidthEmu * 7));
+  marker.setAttribute('markerHeight', String(strokeWidthEmu * 7));
   marker.setAttribute('orient', 'auto-start-reverse');
-  marker.setAttribute('markerUnits', 'strokeWidth');
+  marker.setAttribute('markerUnits', 'userSpaceOnUse');
   if (type === 'oval') {
     const ellipse = document.createElementNS(SVG_NS, 'ellipse');
     ellipse.setAttribute('cx', '5');
@@ -255,20 +267,20 @@ function renderPara(
   const p = document.createElement('p');
   const firstRun = para.runs.find(run => run.text !== '\n');
   if (firstRun?.sizePt)
-    p.style.fontSize = `calc(${firstRun.sizePt / 9.6}cqw * var(--font-scale, 1))`;
+    p.style.fontSize = `calc(${ptCqw(firstRun.sizePt, doc)} * var(--font-scale, 1))`;
   if (firstRun?.font && !firstRun.font.startsWith('+')) p.style.fontFamily = fontFamily(firstRun.font);
-  if (firstRun?.color) p.style.color = firstRun.color;
+  if (firstRun?.color && !firstRun.color.includes('gradient(')) p.style.color = firstRun.color;
   if (para.marginLeftEmu !== undefined) p.style.marginLeft = cqw(para.marginLeftEmu, doc.slideWidthEmu);
   else if (para.level) p.style.paddingLeft = `${para.level * 1.4}em`;
   if (para.marginRightEmu !== undefined) p.style.marginRight = cqw(para.marginRightEmu, doc.slideWidthEmu);
   if (para.indentEmu !== undefined) p.style.textIndent = cqw(para.indentEmu, doc.slideWidthEmu);
   if (para.align) p.style.textAlign = para.align;
-  if (para.lineSpacingPt !== undefined) p.style.lineHeight = ptCqw(para.lineSpacingPt);
+  if (para.lineSpacingPt !== undefined) p.style.lineHeight = ptCqw(para.lineSpacingPt, doc);
   else if (para.lineSpacing !== undefined)
     p.style.lineHeight = `${Math.max(0.1, para.lineSpacing * (1 - lineSpacingReduction))}`;
-  if (para.spaceBeforePt !== undefined) p.style.marginTop = ptCqw(para.spaceBeforePt);
+  if (para.spaceBeforePt !== undefined) p.style.marginTop = ptCqw(para.spaceBeforePt, doc);
   else if (para.spaceBefore !== undefined) p.style.marginTop = `${para.spaceBefore}em`;
-  if (para.spaceAfterPt !== undefined) p.style.marginBottom = ptCqw(para.spaceAfterPt);
+  if (para.spaceAfterPt !== undefined) p.style.marginBottom = ptCqw(para.spaceAfterPt, doc);
   else if (para.spaceAfter !== undefined) p.style.marginBottom = `${para.spaceAfter}em`;
   p.style.whiteSpace = wrapText ? 'pre-wrap' : 'pre';
   if (para.bullet) {
@@ -278,8 +290,8 @@ function renderPara(
     const bulletFont = para.bulletFont ?? firstRun?.font;
     if (bulletFont && !bulletFont.startsWith('+')) bullet.style.fontFamily = fontFamily(bulletFont);
     if (firstRun?.sizePt)
-      bullet.style.fontSize = `calc(${firstRun.sizePt / 9.6}cqw * var(--font-scale, 1))`;
-    if (firstRun?.color) bullet.style.color = firstRun.color;
+      bullet.style.fontSize = `calc(${ptCqw(firstRun.sizePt, doc)} * var(--font-scale, 1))`;
+    applyTextPaint(bullet, firstRun?.color, firstRun?.colorGradient);
     if (firstRun?.bold) bullet.style.fontWeight = '700';
     if (firstRun?.italic) bullet.style.fontStyle = 'italic';
     p.appendChild(bullet);
@@ -291,8 +303,8 @@ function renderPara(
     if (run.bold) span.style.fontWeight = '700';
     if (run.italic) span.style.fontStyle = 'italic';
     if (run.underline) span.style.textDecoration = 'underline';
-    if (run.sizePt) span.style.fontSize = `calc(${run.sizePt / 9.6}cqw * var(--font-scale, 1))`;
-    if (run.color) span.style.color = run.color;
+    if (run.sizePt) span.style.fontSize = `calc(${ptCqw(run.sizePt, doc)} * var(--font-scale, 1))`;
+    applyTextPaint(span, run.color, run.colorGradient);
     if (run.shadow) span.style.textShadow = textShadow(run.shadow, doc);
     p.appendChild(span);
   }
@@ -300,12 +312,12 @@ function renderPara(
 }
 
 function renderTable(table: PptTable, doc: PptDoc): HTMLElement {
+  const sourceHeight = table.transform ? table.localHeightEmu ?? table.h : table.h;
+  table = physicalBox(table);
   const tbl = document.createElement('table');
   tbl.className = 'tbl';
-  tbl.style.left = pct(table.x, doc.slideWidthEmu);
-  tbl.style.top = pct(table.y, doc.slideHeightEmu);
-  tbl.style.width = pct(table.w, doc.slideWidthEmu);
-  tbl.style.height = pct(table.h, doc.slideHeightEmu);
+  position(tbl, table, doc);
+  tbl.style.fontSize = ptCqw(14, doc);
   if (table.columns.length) {
     const colgroup = document.createElement('colgroup');
     const total = table.columns.reduce((sum, value) => sum + value, 0);
@@ -316,18 +328,27 @@ function renderTable(table: PptTable, doc: PptDoc): HTMLElement {
     }
     tbl.appendChild(colgroup);
   }
-  table.rows.forEach((row, ri) => {
+  table.rows.forEach(row => {
     const tr = document.createElement('tr');
-    if (row.heightEmu) tr.style.height = pct(row.heightEmu, table.h);
+    if (row.heightEmu) tr.style.height = pct(row.heightEmu, sourceHeight);
     row.cells.forEach(cell => {
-      const td = document.createElement(ri === 0 ? 'th' : 'td');
-      td.textContent = cell.text;
+      const td = document.createElement(cell.isHeader ? 'th' : 'td');
+      if (cell.paragraphs?.length) {
+        for (const paragraph of cell.paragraphs) td.appendChild(renderPara(paragraph, doc, 0, true));
+      } else td.textContent = cell.text;
       if (cell.colSpan > 1) td.colSpan = cell.colSpan;
       if (cell.rowSpan > 1) td.rowSpan = cell.rowSpan;
       if (cell.fill) td.style.background = cell.fill;
       if (cell.color) td.style.color = cell.color;
-      if (cell.fontSizePt) td.style.fontSize = `${cell.fontSizePt / 9.6}cqw`;
+      if (cell.fontSizePt) td.style.fontSize = ptCqw(cell.fontSizePt, doc);
       if (cell.align) td.style.textAlign = cell.align;
+      if (cell.verticalAlign) td.style.verticalAlign = cell.verticalAlign === 'center' ? 'middle' : cell.verticalAlign;
+      applyWritingMode(td, cell.verticalText);
+      for (const side of ['top', 'right', 'bottom', 'left'] as const) {
+        const border = cell.borders?.[side];
+        td.style.setProperty(`border-${side}`, border && border.widthEmu > 0 && border.color !== 'transparent'
+          ? `${cqw(border.widthEmu, doc.slideWidthEmu)} ${cssLineStyle(border.dash)} ${border.color ?? '#000'}` : 'none');
+      }
       td.style.padding = [
         cqw(cell.marginTopEmu, doc.slideWidthEmu),
         cqw(cell.marginRightEmu, doc.slideWidthEmu),
@@ -341,24 +362,39 @@ function renderTable(table: PptTable, doc: PptDoc): HTMLElement {
   return tbl;
 }
 
-function position(el: HTMLElement | SVGSVGElement, shape: PptShape, doc: PptDoc): void {
-  el.style.left = pct(shape.x, doc.slideWidthEmu);
-  el.style.top = pct(shape.y, doc.slideHeightEmu);
+function physicalBox<T extends { w: number; h: number; transform?: PptTransform; localWidthEmu?: number; localHeightEmu?: number }>(value: T): T {
+  if (!value.transform) return value;
+  const [a, b, c, d, e, f] = value.transform;
+  const scaleX = Math.hypot(a, b) || 1;
+  const scaleY = Math.hypot(c, d) || 1;
+  // Group child coordinates can use arbitrary units (the real deck uses 635
+  // units of slide EMU per child unit). Absorb that scale into the box only:
+  // font sizes, insets, line widths and shadow distances are already physical.
+  // Normalized columns retain rotation, reflection and nested-group shear.
+  return {
+    ...value,
+    w: (value.localWidthEmu ?? value.w) * scaleX,
+    h: (value.localHeightEmu ?? value.h) * scaleY,
+    transform: [a / scaleX, b / scaleX, c / scaleY, d / scaleY, e, f],
+  };
+}
+
+function position(el: HTMLElement | SVGSVGElement, shape: Pick<PptShape, 'x' | 'y' | 'w' | 'h'> & { transform?: PptTransform; rotation?: number; flipH?: boolean; flipV?: boolean }, doc: PptDoc): void {
+  el.style.left = shape.transform ? '0' : pct(shape.x, doc.slideWidthEmu);
+  el.style.top = shape.transform ? '0' : pct(shape.y, doc.slideHeightEmu);
   el.style.width = pct(shape.w, doc.slideWidthEmu);
   el.style.height = pct(shape.h, doc.slideHeightEmu);
+  if (shape.transform) {
+    const [a, b, c, d, e, f] = shape.transform;
+    el.style.transformOrigin = '0 0';
+    el.style.transform = `translate(${cqw(e, doc.slideWidthEmu)},${cqw(f, doc.slideWidthEmu)}) matrix(${a},${b},${c},${d},0,0)`;
+  } else el.style.transform = transform(shape);
 }
 
-function transform(shape: PptShape): string {
-  const transforms = [`rotate(${shape.rotation}deg)`];
+function transform(shape: { rotation?: number; flipH?: boolean; flipV?: boolean }): string {
+  const transforms = [`rotate(${shape.rotation ?? 0}deg)`];
   if (shape.flipH || shape.flipV) transforms.push(`scale(${shape.flipH ? -1 : 1},${shape.flipV ? -1 : 1})`);
   return transforms.join(' ');
-}
-
-function applyStroke(box: HTMLElement, shape: PptShape): void {
-  if (!shape.stroke || shape.stroke === 'transparent') return;
-  box.style.borderColor = shape.stroke;
-  box.style.borderWidth = `${Math.max(0.5, (shape.strokeWidthEmu ?? 12_700) / 12_700)}px`;
-  box.style.borderStyle = shape.dash && shape.dash !== 'solid' ? 'dashed' : 'solid';
 }
 
 function appendShapeGeometry(box: HTMLElement, shape: PptShape, doc: PptDoc): void {
@@ -370,7 +406,7 @@ function appendShapeGeometry(box: HTMLElement, shape: PptShape, doc: PptDoc): vo
       const svg = geometrySvg(customPath.width, customPath.height);
       const path = document.createElementNS(SVG_NS, 'path');
       path.setAttribute('d', customPath.data);
-      styleGeometry(path, shape, customPath.fill, customPath.stroke);
+      styleGeometry(svg, path, shape, doc, customPath.fill, customPath.stroke);
       svg.appendChild(path);
       layer.appendChild(svg);
     }
@@ -378,20 +414,19 @@ function appendShapeGeometry(box: HTMLElement, shape: PptShape, doc: PptDoc): vo
     return;
   }
 
-  const rounded = shape.shapeType === 'roundRect' || shape.shapeType === 'round2SameRect';
-  const svg = rounded ? geometrySvg(shape.w, shape.h) : geometrySvg(100, 100);
+  const svg = geometrySvg(100, 100);
   if (shape.shapeType === 'ellipse') {
     const ellipse = document.createElementNS(SVG_NS, 'ellipse');
     ellipse.setAttribute('cx', '50');
     ellipse.setAttribute('cy', '50');
-    ellipse.setAttribute('rx', '49');
-    ellipse.setAttribute('ry', '49');
-    styleGeometry(ellipse, shape, true, true);
+    ellipse.setAttribute('rx', '50');
+    ellipse.setAttribute('ry', '50');
+    styleGeometry(svg, ellipse, shape, doc, true, true);
     svg.appendChild(ellipse);
   } else {
     const path = document.createElementNS(SVG_NS, 'path');
-    path.setAttribute('d', rounded ? roundedRectPath(shape) : presetPath(shape.shapeType));
-    styleGeometry(path, shape, shape.shapeType !== 'leftBracket', true);
+    path.setAttribute('d', presetPath(shape));
+    styleGeometry(svg, path, shape, doc, !/Bracket|Brace/.test(shape.shapeType ?? ''), true);
     svg.appendChild(path);
   }
   layer.appendChild(svg);
@@ -407,64 +442,58 @@ function geometrySvg(width: number, height: number): SVGSVGElement {
 }
 
 function styleGeometry(
+  svg: SVGSVGElement,
   geometry: SVGGeometryElement,
   shape: PptShape,
+  doc: PptDoc,
   useFill: boolean,
   useStroke: boolean,
 ): void {
-  geometry.setAttribute('fill', useFill ? svgFill(shape.fill) : 'none');
-  geometry.setAttribute('stroke', useStroke ? (shape.stroke ?? 'none') : 'none');
-  geometry.setAttribute('stroke-width', `${strokePixels(shape)}`);
+  geometry.setAttribute('fill', useFill ? svgPaint(svg, shape.fill, shape.fillGradient, shape.w, shape.h) : 'none');
+  geometry.setAttribute('stroke', useStroke ? svgPaint(svg, shape.stroke, shape.strokeGradient, shape.w, shape.h) : 'none');
+  geometry.style.strokeWidth = cqw(shape.strokeWidthEmu ?? 12700, doc.slideWidthEmu);
   geometry.setAttribute('vector-effect', 'non-scaling-stroke');
   geometry.setAttribute('stroke-linejoin', 'round');
-  if (shape.dash && shape.dash !== 'solid') geometry.setAttribute('stroke-dasharray', '5 4');
+  applyDash(geometry, shape, doc);
 }
 
-function svgFill(fill?: string): string {
-  if (!fill || fill === 'transparent') return 'none';
-  if (!fill.includes('gradient(')) return fill;
-  return fill.match(/#[0-9a-f]{6,8}/i)?.[0] ?? 'none';
+function applyDash(path: SVGGeometryElement, shape: PptShape, doc: PptDoc): void {
+  const pattern = dashArray(shape.dash);
+  if (pattern) path.setAttribute('stroke-dasharray', pattern.split(' ')
+    .map(value => cqw(Number(value) * (shape.strokeWidthEmu ?? 12700), doc.slideWidthEmu)).join(' '));
 }
 
-function strokePixels(shape: PptShape): number {
-  return Math.max(0.6, (shape.strokeWidthEmu ?? 12_700) / 12_700);
-}
-
-function roundedRectPath(shape: PptShape): string {
-  const width = Math.max(1, Math.abs(shape.w));
-  const height = Math.max(1, Math.abs(shape.h));
-  const adjustment = Math.min(50_000, Math.max(0, shape.adjustments?.[0] ?? 16_667));
-  const radius = Math.min(width, height) * adjustment / 100_000;
-  if (radius <= 0) return `M 0 0 H ${width} V ${height} H 0 Z`;
-  if (shape.shapeType === 'round2SameRect') {
-    return `M ${radius} 0 H ${width - radius} A ${radius} ${radius} 0 0 1 ${width} ${radius} V ${height} H 0 V ${radius} A ${radius} ${radius} 0 0 1 ${radius} 0 Z`;
+function pictureClip(shape: PptShape): HTMLElement {
+  const clip = document.createElement('div');
+  clip.className = 'picture-clip';
+  if (shape.shapeType === 'ellipse') {
+    clip.style.clipPath = 'ellipse(50% 50% at 50% 50%)';
+  } else if (shape.customPaths.length || (shape.shapeType && shape.shapeType !== 'rect')) {
+    const svg = document.createElementNS(SVG_NS, 'svg');
+    svg.style.position = 'absolute';
+    svg.style.width = svg.style.height = '0';
+    const defs = document.createElementNS(SVG_NS, 'defs');
+    const pathClip = document.createElementNS(SVG_NS, 'clipPath');
+    pathClip.id = `ppt-picture-${++markerId}`;
+    pathClip.setAttribute('clipPathUnits', 'objectBoundingBox');
+    const paths = shape.customPaths.length ? shape.customPaths : [{ data: presetPath(shape), width: 100, height: 100 }];
+    for (const item of paths) {
+      const path = document.createElementNS(SVG_NS, 'path');
+      path.setAttribute('d', item.data);
+      path.setAttribute('transform', `scale(${1 / Math.max(1, item.width)} ${1 / Math.max(1, item.height)})`);
+      pathClip.appendChild(path);
+    }
+    defs.appendChild(pathClip); svg.appendChild(defs); clip.appendChild(svg);
+    clip.style.clipPath = `url(#${pathClip.id})`;
   }
-  return `M ${radius} 0 H ${width - radius} A ${radius} ${radius} 0 0 1 ${width} ${radius} V ${height - radius} A ${radius} ${radius} 0 0 1 ${width - radius} ${height} H ${radius} A ${radius} ${radius} 0 0 1 0 ${height - radius} V ${radius} A ${radius} ${radius} 0 0 1 ${radius} 0 Z`;
+  return clip;
 }
 
-function presetPath(shapeType?: string): string {
-  switch (shapeType) {
-    case 'roundRect':
-    case 'round2SameRect': return 'M 10 1 H 90 Q 99 1 99 10 V 90 Q 99 99 90 99 H 10 Q 1 99 1 90 V 10 Q 1 1 10 1 Z';
-    case 'triangle': return 'M 50 1 L 99 99 L 1 99 Z';
-    case 'rtTriangle': return 'M 1 1 L 99 99 L 1 99 Z';
-    case 'diamond': return 'M 50 1 L 99 50 L 50 99 L 1 50 Z';
-    case 'parallelogram': return 'M 20 1 H 99 L 80 99 H 1 Z';
-    case 'trapezoid': return 'M 20 1 H 80 L 99 99 H 1 Z';
-    case 'pentagon': return 'M 50 1 L 99 38 L 80 99 H 20 L 1 38 Z';
-    case 'hexagon': return 'M 25 1 H 75 L 99 50 L 75 99 H 25 L 1 50 Z';
-    case 'octagon': return 'M 30 1 H 70 L 99 30 V 70 L 70 99 H 30 L 1 70 V 30 Z';
-    case 'chevron': return 'M 1 1 H 62 L 99 50 L 62 99 H 1 L 38 50 Z';
-    case 'homePlate': return 'M 1 1 H 70 L 99 50 L 70 99 H 1 Z';
-    case 'leftArrow': return 'M 1 50 L 38 1 V 28 H 99 V 72 H 38 V 99 Z';
-    case 'rightArrow': return 'M 99 50 L 62 1 V 28 H 1 V 72 H 62 V 99 Z';
-    case 'upArrow': return 'M 50 1 L 99 38 H 72 V 99 H 28 V 38 H 1 Z';
-    case 'downArrow': return 'M 50 99 L 99 62 H 72 V 1 H 28 V 62 H 1 Z';
-    case 'leftRightArrow': return 'M 1 50 L 28 20 V 35 H 72 V 20 L 99 50 L 72 80 V 65 H 28 V 80 Z';
-    case 'upDownArrow': return 'M 50 1 L 80 28 H 65 V 72 H 80 L 50 99 L 20 72 H 35 V 28 H 20 Z';
-    case 'leftBracket': return 'M 80 1 H 55 Q 20 1 20 25 V 75 Q 20 99 55 99 H 80';
-    default: return 'M 1 1 H 99 V 99 H 1 Z';
-  }
+function applyWritingMode(element: HTMLElement, direction?: string): void {
+  if (!direction || direction === 'horz') return;
+  element.style.writingMode = direction === 'mongolianVert' ? 'vertical-lr' : 'vertical-rl';
+  if (direction === 'eaVert' || direction.startsWith('wordArtVert')) element.style.textOrientation = 'upright';
+  if (direction === 'vert270') element.style.transform = 'rotate(180deg)';
 }
 
 function verticalAlignment(value?: PptShape['verticalAlign']): string {
@@ -502,8 +531,8 @@ function textShadow(shadow: PptShadow, doc: PptDoc): string {
   return `${cqw(offset.x, doc.slideWidthEmu)} ${cqw(offset.y, doc.slideWidthEmu)} ${cqw(shadow.blurRadiusEmu / 2, doc.slideWidthEmu)} ${shadow.color}`;
 }
 
-function ptCqw(points: number): string {
-  return `${points / 9.6}cqw`;
+function ptCqw(points: number, doc: PptDoc): string {
+  return cqw(points * 12700, doc.slideWidthEmu);
 }
 
 function pct(emu: number, total: number): string {

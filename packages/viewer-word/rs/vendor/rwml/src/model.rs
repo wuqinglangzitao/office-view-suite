@@ -961,6 +961,8 @@ pub struct Table {
     pub width_pct: Option<f32>,
     /// Use Word's fixed table layout algorithm instead of autofit.
     pub fixed_layout: bool,
+    /// Source minimum row heights in points; absent entries grow with content.
+    pub row_min_heights_pt: Vec<Option<f32>>,
     /// Table indentation in twips, if explicitly set.
     pub indent_twips: Option<i32>,
     /// Table alignment, if explicitly set.
@@ -1031,6 +1033,62 @@ pub struct CellMargins {
     pub left: u32,
 }
 
+/// One source border declaration, including an explicit clear.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CellBorder {
+    /// Browser line style, including an explicit `none` override.
+    pub style: &'static str,
+    /// Source RGB color; automatic color is represented by black at display time.
+    pub color: Option<Color>,
+    /// Width in eighths of one point.
+    pub width_eighths: u16,
+}
+
+/// Sparse border declarations. Missing edges inherit; `style = "none"` clears.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CellBorders {
+    /// Physical top edge.
+    pub top: Option<CellBorder>,
+    /// Physical right edge.
+    pub right: Option<CellBorder>,
+    /// Physical bottom edge.
+    pub bottom: Option<CellBorder>,
+    /// Physical left edge.
+    pub left: Option<CellBorder>,
+    /// Interior horizontal edges.
+    pub inside_h: Option<CellBorder>,
+    /// Interior vertical edges.
+    pub inside_v: Option<CellBorder>,
+    /// Logical leading edge, resolved using table direction.
+    pub start: Option<CellBorder>,
+    /// Logical trailing edge, resolved using table direction.
+    pub end: Option<CellBorder>,
+}
+
+impl CellBorders {
+    pub(crate) fn overlay(&mut self, other: Self) {
+        self.top = other.top.or(self.top);
+        self.right = other.right.or(self.right);
+        self.bottom = other.bottom.or(self.bottom);
+        self.left = other.left.or(self.left);
+        self.inside_h = other.inside_h.or(self.inside_h);
+        self.inside_v = other.inside_v.or(self.inside_v);
+        self.start = other.start.or(self.start);
+        self.end = other.end.or(self.end);
+    }
+
+    pub(crate) fn physical(mut self, rtl: bool) -> Self {
+        if rtl {
+            self.right = self.start.or(self.right);
+            self.left = self.end.or(self.left);
+        } else {
+            self.left = self.start.or(self.left);
+            self.right = self.end.or(self.right);
+        }
+        self
+    }
+}
+
 /// A table cell — may hold block content and span rows/columns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Cell {
@@ -1051,6 +1109,8 @@ pub struct Cell {
     /// Effective physical cell margins in twips, if modeled from table defaults
     /// or direct cell properties.
     pub margins: Option<CellMargins>,
+    /// Resolved source borders for browser preview. Missing sides have no line.
+    pub borders: CellBorders,
 }
 
 impl Default for Cell {
@@ -1064,6 +1124,7 @@ impl Default for Cell {
             valign: VCell::Top,
             width_pct: None,
             margins: None,
+            borders: CellBorders::default(),
         }
     }
 }
@@ -1100,6 +1161,32 @@ pub struct Image {
     pub rotation_degrees: Option<i32>,
     /// Page-relative floating anchor offset in EMUs, when authoring `wp:anchor`.
     pub floating_offset_emu: Option<(i64, i64)>,
+    /// Source DrawingML layout, separate from intrinsic raster dimensions.
+    pub drawing_layout: Option<ImageDrawingLayout>,
+}
+
+/// Per-occurrence drawing geometry used by browser previews.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ImageDrawingLayout {
+    /// Display width from `wp:extent`, leaving raster pixel data unchanged.
+    pub width_px: Option<u32>,
+    /// Display height from `wp:extent`.
+    pub height_px: Option<u32>,
+    /// Numeric source anchor when both reference axes are supported.
+    pub anchor: Option<ImageAnchor>,
+}
+
+/// Validated numeric floating position; unsupported alignment modes stay inline.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ImageAnchor {
+    /// Horizontal coordinate origin: `page`, `margin`, or `column`.
+    pub horizontal_from: &'static str,
+    /// Vertical coordinate origin: `page`, `margin`, or `paragraph`.
+    pub vertical_from: &'static str,
+    /// Horizontal offset from the source origin in EMUs.
+    pub x_emu: i64,
+    /// Vertical offset from the source origin in EMUs.
+    pub y_emu: i64,
 }
 
 /// Supported chart layouts for authored `.docx` output.

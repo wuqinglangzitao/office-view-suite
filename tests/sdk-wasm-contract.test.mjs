@@ -96,8 +96,24 @@ test('Word WASM preserves page units, inline styles and merged table structure',
   assert.equal(table.grid[1][1].kind, 'covered');
   assert.equal(table.grid[2][2].cell.rowSpan, 2);
   assert.equal(table.grid[3][2].kind, 'covered');
+  assert.equal(table.grid[0][0].cell.shading, '#ddebf7');
+  assert.deepEqual(table.grid[0][0].cell.borders.top, {
+    style: 'solid', color: '#000000', widthPt: 0.5,
+  });
   assert.equal(document.stats.tables, 1);
   assert.ok(document.stats.paragraphs > 0 && document.stats.runs > 0);
+});
+
+test('Word WASM passes source pagination controls and running distances to the browser', async () => {
+  const manual = await parse('word', 'manual.docx');
+  assert.ok(manual.blocks.some(block => block.pagination?.keepNext && block.pagination.keepLines));
+  assert.ok(Math.abs(manual.setup.headerDistancePt - 42.55) < 0.0001);
+  assert.ok(Math.abs(manual.setup.footerDistancePt - 49.6) < 0.0001);
+  const requirements = await parse('word', 'req.docx');
+  assert.equal(requirements.setup.headerDistancePt, 34);
+  assert.equal(requirements.setup.footerDistancePt, 34);
+  assert.equal(requirements.blocks.find(block => block.kind === 'sectionBreak').section.breakType, 'oddPage');
+  assert.ok(requirements.blocks.some(block => block.pagination?.widowControl));
 });
 
 test('Excel WASM preserves coordinates, style values, number formats and merge references', async () => {

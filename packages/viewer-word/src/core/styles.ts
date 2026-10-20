@@ -20,7 +20,8 @@ export const SHADOW_CSS = `
   overflow: hidden;
 }
 .page-body { position: absolute; overflow: hidden; }
-.page-header, .page-footer { position: absolute; min-height: 14pt; font-size: 9pt; color: #4c535a; }
+.page-column[data-separator]::after { content: ''; position: absolute; top: 0; bottom: 0; inset-inline-end: var(--separator-offset); border-inline-end: 0.5pt solid currentColor; }
+.page-header, .page-footer { position: absolute; min-height: 14pt; }
 .page-header p, .page-footer p { margin: 0; }
 .page-footer { text-align: center; }
 .page-number { display: block; text-align: center; }
@@ -30,14 +31,25 @@ h1, h2, h3, h4, h5, h6 { line-height: 1.3; margin: 0.9em 0 0.4em; font-weight: 7
 h1 { font-size: 1.6em; } h2 { font-size: 1.35em; } h3 { font-size: 1.18em; }
 h4, h5, h6 { font-size: 1.05em; }
 p { margin: 0.35em 0; white-space: pre-wrap; }
-p:empty { min-height: 1.5em; }
+p:empty { min-height: 1em; min-height: 1lh; }
 li { white-space: pre-wrap; }
+.word-tab { display: inline-block; position: relative; width: 0; height: 0; text-indent: 0; vertical-align: baseline; }
+.word-tab-source { position: absolute; font-size: 0; }
+.word-tab::after { content: attr(data-leader-text); position: absolute; left: 0; top: -1em; width: 100%; height: 1.2em; overflow: hidden; white-space: pre; line-height: 1; text-align: left; }
+[data-line-spacing="atLeast"] span { line-height: normal; }
+[data-line-spacing="exact"] span, [data-line-spacing="exact"] sup, [data-line-spacing="exact"] sub { line-height: 0; }
 
 .b { font-weight: 700; }
 .i { font-style: italic; }
 .u { text-decoration: underline; }
 .s { text-decoration: line-through; }
 .u.s { text-decoration: underline line-through; }
+.word-underlined-spaces { position: relative; text-indent: 0; }
+.word-underlined-spaces::after { content: ''; position: absolute; left: 0; right: 0; top: calc(50% + .5em); border-bottom: .5pt solid currentColor; pointer-events: none; }
+/* A generated child interrupts native hanging spaces across source runs. */
+.word-hanging-underline::after { content: none; }
+.word-hanging-underline { background-image: linear-gradient(currentColor, currentColor); background-position: left calc(50% + .5em); background-size: var(--word-underline-width, 0px) .5pt; background-repeat: no-repeat; }
+.word-centered-space-suffix { display: inline-block; vertical-align: top; overflow: hidden; white-space: pre; text-indent: 0; text-align: left; width: 0; }
 
 a { color: #0969da; }
 
@@ -60,20 +72,32 @@ img { max-width: 100%; height: auto; }
 li { margin: 0.15em 0; }
 /* 真实序号(文档 marker):inline 流内渲染,不与文字重叠 */
 li[data-marker] { list-style: none; }
+.list-run li[data-continuation] { list-style: none; }
+.list-run li[data-continuation]::before { content: none; }
 
 .tbl-wrap { overflow-x: auto; margin: 0.8em 0; }
 .tbl-wrap + .tbl-wrap { margin-top: 0; }
 table { border-collapse: collapse; }
 th, td {
-  border: 1px solid #9aa3ab;
+  border: none;
   padding: 4px 8px;
   text-align: left;
   vertical-align: top;
 }
-th { background: #f0f2f4; font-weight: 600; }
+th { font-weight: inherit; }
+/* Editing guides for source edges without borders; backgrounds do not alter layout. */
+.word-cell-grid {
+  --word-grid-horizontal: repeating-linear-gradient(90deg, #b6b6b6 0 1px, transparent 1px 3px);
+  --word-grid-vertical: repeating-linear-gradient(180deg, #b6b6b6 0 1px, transparent 1px 3px);
+  background-image: var(--word-grid-top, none), var(--word-grid-right, none), var(--word-grid-bottom, none), var(--word-grid-left, none);
+  background-size: 100% 1px, 1px 100%, 100% 1px, 1px 100%;
+  background-position: left top, right top, left bottom, left top;
+  background-repeat: no-repeat;
+}
 
 @media print {
   .doc { padding: 0; }
   .page { margin: 0; box-shadow: none; break-after: page; }
+  .word-cell-grid { background-image: none; }
 }
 `;

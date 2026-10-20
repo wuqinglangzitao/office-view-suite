@@ -249,16 +249,19 @@ impl From<TableRowStyleRegions> for TableCellStyleRegions {
 pub(crate) struct TableStyleCellPresentation {
     pub(crate) margins: super::body::CellMarginSpec,
     pub(crate) defaults: super::body::TableStyleCellDefaults,
+    pub(crate) borders: crate::model::CellBorders,
 }
 
 impl TableStyleCellPresentation {
     fn overlay(&mut self, other: Self) {
         self.margins.overlay(other.margins);
         self.defaults.overlay(other.defaults);
+        self.borders.overlay(other.borders);
     }
 
     fn is_empty(self) -> bool {
         self.margins.is_empty() && self.defaults.is_empty()
+            && self.borders == crate::model::CellBorders::default()
     }
 }
 
@@ -1887,10 +1890,16 @@ fn resolve_style_table_borders(
         .as_deref()
         .and_then(|base| resolve_style_table_borders(base, raw_styles, stack, depth + 1));
     if style.table_borders.is_some() {
+        let mut preview = borders.map(|borders| borders.6).unwrap_or_default();
+        preview.overlay(style.table_borders.unwrap().6);
         borders = style.table_borders;
+        borders.as_mut().unwrap().6 = preview;
     }
     if style.whole_table_borders.is_some() {
+        let mut preview = borders.map(|borders| borders.6).unwrap_or_default();
+        preview.overlay(style.whole_table_borders.unwrap().6);
         borders = style.whole_table_borders;
+        borders.as_mut().unwrap().6 = preview;
     }
     stack.pop();
     borders
@@ -2093,6 +2102,9 @@ fn read_conditional_cell_presentation(
                     b"tcMar",
                     depth as u32 + 1,
                 ));
+            }
+            Ok(Event::Start(e)) if local(e.name().as_ref()) == b"tcBorders" => {
+                presentation.borders.overlay(super::body::read_cell_borders(r, b"tcBorders"));
             }
             Ok(Event::Start(e)) if local(e.name().as_ref()) == b"AlternateContent" => {
                 if let Some(value) =
