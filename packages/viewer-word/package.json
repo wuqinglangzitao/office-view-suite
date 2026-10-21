@@ -1,7 +1,10 @@
 {
   "name": "@office-view-suite/viewer-word",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "license": "Apache-2.0",
+  "publishConfig": {
+    "registry": "http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",

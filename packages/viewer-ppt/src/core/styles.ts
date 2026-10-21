@@ -2,7 +2,7 @@
 export const SHADOW_CSS = `
 :host { display: block; }
 
-.deck { display: flex; flex-direction: column; gap: 24px; }
+.deck { display: flex; flex-direction: column; gap: 24px; width: var(--office-viewer-layout-width, 100%); margin-inline: auto; }
 
 .slide {
   position: relative;

@@ -26,7 +26,8 @@ class Element {
   style = {};
   ownerDocument = { createElement: () => new Element() };
   appendChild(child) { child.parent = this; this.children.push(child); }
-  attachShadow() { return this.shadowRoot = { replaceChildren() {} }; }
+  replaceChildren(...children) { this.children = []; for (const child of children) this.appendChild(child); }
+  attachShadow() { return this.shadowRoot = { childNodes: [], replaceChildren(...children) { this.childNodes = children; } }; }
   getBoundingClientRect() { return { width: 600 }; }
   remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
 }

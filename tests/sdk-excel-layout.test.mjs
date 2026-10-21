@@ -73,7 +73,7 @@ function viewportHarness(sheet, width, height, onContentChange) {
   let nextFrame = 0;
   const owner = {
     defaultView: {
-      getComputedStyle: () => ({ fontFamily: 'sans-serif' }),
+      getComputedStyle: node => ({ fontFamily: 'sans-serif', zoom: node.style.zoom || '1' }),
       requestAnimationFrame(callback) { frames.set(++nextFrame, callback); return nextFrame; },
       cancelAnimationFrame(id) { frames.delete(id); },
     },
@@ -96,7 +96,10 @@ function viewportHarness(sheet, width, height, onContentChange) {
   Object.assign(viewport, { clientWidth: width, clientHeight: height, scrollLeft: 0, scrollTop: 0 });
   element.append(viewport); viewport.append(grid);
   const rendered = kind => () => { const node = new Element(); node.classList.add(kind); return node; };
-  const view = renderVirtualSheet(sheet, element, viewport, grid, {}, { cell: rendered('cell'), image: rendered('image'), shape: rendered('shape') }, undefined, onContentChange);
+  const view = renderVirtualSheet(sheet, element, viewport, grid, {}, {
+    cell(_cell, row, col) { const node = rendered('cell')(); node.dataset = { row: String(row), col: String(col) }; return node; },
+    image: rendered('image'), shape: rendered('shape'),
+  }, undefined, onContentChange);
   const nodes = () => grid.children.flatMap(layer => layer.children.flatMap(pane => pane.children));
   const fontsChanged = () => { for (const listener of fontListeners) listener(); };
   const flushFrame = () => { const pending = [...frames.values()]; frames.clear(); for (const callback of pending) callback(); };
@@ -142,6 +145,60 @@ test('Excel shape offsets contribute to scroll bounds and remain visible past th
   assert.ok(shape);
   assert.equal(shape.style.left, '100px');
   assert.equal(shape.style.top, '-50px');
+  view.dispose();
+});
+
+test('Excel content zoom keeps the final cells and frozen panes reachable in a fixed viewport', () => {
+  const sheet = {
+    highestRow: 1000, highestCol: 30, cells: [], merges: [], rowHeights: [], colWidths: [],
+    frozenRows: 1, frozenColumns: 1, images: [], shapes: [],
+  };
+  const { view, viewport, grid, nodes } = viewportHarness(sheet, 300, 100);
+  for (const zoom of [0.5, 1, 1.5, 2]) {
+    grid.style.zoom = String(zoom);
+    viewport.scrollLeft = 2880 * zoom - 300;
+    viewport.scrollTop = 26000 * zoom - 100;
+    view.resize();
+    assert.equal(viewport.clientWidth, 300);
+    assert.equal(viewport.clientHeight, 100);
+    assert.equal(grid.children[0].style.width, `${300 / zoom}px`);
+    assert.equal(grid.children[0].style.height, `${100 / zoom}px`);
+    const last = nodes().find(node => node.dataset.row === '1000' && node.dataset.col === '30');
+    assert.ok(last, `last cell must be visible at ${zoom}x`);
+    assert.equal(last.style.width, '96px');
+    assert.equal(last.style.height, '26px');
+    const corner = nodes().find(node => node.classes.has('frozen-corner'));
+    assert.ok(corner, `frozen corner must remain mounted at ${zoom}x`);
+    assert.equal(corner.style.left, '0px');
+    assert.equal(corner.style.top, '0px');
+  }
+  view.dispose();
+});
+
+test('Excel content zoom converts drawing and merged-cell positions from the unscaled scroll viewport', () => {
+  const sheet = {
+    highestRow: 1000, highestCol: 30, cells: [], merges: ['B900:D902'], rowHeights: [], colWidths: [],
+    frozenRows: 0, frozenColumns: 0, shapes: [],
+    images: [{ row: 900, col: 2, widthPx: 80, heightPx: 40, data: 'data:image/png;base64,', name: 'zoomed', fitCell: false }],
+  };
+  const { view, viewport, grid, nodes } = viewportHarness(sheet, 300, 100);
+  for (const zoom of [0.5, 1.5, 2]) {
+    grid.style.zoom = String(zoom);
+    viewport.scrollLeft = 96 * zoom;
+    viewport.scrollTop = 899 * 26 * zoom;
+    view.resize();
+    const image = nodes().find(node => node.classes.has('image'));
+    assert.ok(image, `drawing must remain visible at ${zoom}x`);
+    assert.equal(image.style.left, '0px');
+    assert.equal(image.style.top, '0px');
+    assert.equal(image.style.width, '80px');
+    const merge = nodes().find(node => node.dataset.row === '900' && node.dataset.col === '2');
+    assert.ok(merge, `merged anchor must remain visible at ${zoom}x`);
+    assert.equal(merge.style.left, '0px');
+    assert.equal(merge.style.top, '0px');
+    assert.equal(merge.style.width, '288px');
+    assert.equal(merge.style.height, '78px');
+  }
   view.dispose();
 });
 

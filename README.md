@@ -51,7 +51,11 @@ pnpm dev:sdk    # 构建 SDK 并启动多实例接入示例
 
 ## SDK 接入
 
-公共入口为 `@office-view-suite/viewer`。当前可在工作区内引用；跨项目接入需要本地构建六个包并使用 `.tgz` 安装，具体方法见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
+公共入口为 `@office-view-suite/viewer`，可从前端私服安装；其余五个包会自动安装。作用域配置、离线 `.tgz` 交付和源码构建见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
+
+```sh
+pnpm add @office-view-suite/viewer@0.1.2 --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+```
 
 在页面中准备文件选择框和具有可测量宽度的容器：
 

@@ -21,14 +21,18 @@ const { createOfficeViewer } = await import('../packages/viewer/dist/index.js');
 
 class Element {
   children = [];
-  style = { setProperty(name, value) { this[name] = value; } };
+  style = { setProperty(name, value) { this[name] = value; }, removeProperty(name) { delete this[name]; } };
   scrollWidth = 640;
   get clientWidth() { return this.parent?.clientWidth ?? this.width; }
   width = 640;
+  height = 0;
+  get clientHeight() { return this.parent?.clientHeight ?? this.height; }
+  set clientHeight(value) { this.height = value; }
   ownerDocument = { createElement: () => new Element() };
   appendChild(child) { this.children.push(child); child.parent = this; return child; }
-  attachShadow() { this.shadowRoot = { children: [], querySelectorAll() { return []; }, replaceChildren(...children) { this.children = children; } }; return this.shadowRoot; }
-  getBoundingClientRect() { return { width: this.width }; }
+  replaceChildren(...children) { this.children = []; for (const child of children) this.appendChild(child); }
+  attachShadow() { this.shadowRoot = { children: [], get childNodes() { return this.children; }, querySelectorAll() { return []; }, replaceChildren(...children) { this.children = children; } }; return this.shadowRoot; }
+  getBoundingClientRect() { return { width: this.width, height: this.clientHeight }; }
   remove() { this.parent.children = this.parent.children.filter(child => child !== this); }
 }
 
@@ -45,7 +49,7 @@ globalThis.requestAnimationFrame = callback => { frames.set(++nextFrame, callbac
 globalThis.cancelAnimationFrame = id => frames.delete(id);
 function flushFrames() { for (const [id, callback] of frames) { frames.delete(id); callback(); } }
 
-function runtime({ open, resize = true, contentWidth } = {}) {
+function runtime({ open, resize = true, contentWidth, contentZoom = false } = {}) {
   const calls = { created: 0, destroyed: 0, rendered: 0, disposed: 0, resized: 0, contentWidth, options: [], kinds: [] };
   globalThis.__sdkAdapterFactory = (kind, options) => {
     calls.created++;
@@ -65,6 +69,7 @@ function runtime({ open, resize = true, contentWidth } = {}) {
           dispose() { calls.disposed++; host.shadowRoot.replaceChildren(); },
           ...(resize ? { resize() { calls.resized++; } } : {}),
           ...(contentWidth ? { getContentWidth: () => calls.contentWidth } : {}),
+          ...(contentZoom ? { setZoom(scale) { calls.contentScale = scale; } } : {}),
         };
       },
       destroy() { calls.destroyed++; },
@@ -280,11 +285,14 @@ test('zoom preserves rendered content and adapts its viewport without modifying 
   assert.deepEqual(viewer.getZoom(), { mode: 'fixed', scale: 1 });
   viewer.setZoom(2);
   await viewer.open(input('xlsx'));
-  assert.equal(calls.host.style.zoom, '2');
+  assert.equal(calls.host.shadowRoot.children[0].style.zoom, '2');
+  assert.equal(calls.host.style.width, '100%');
+  assert.equal(calls.host.shadowRoot.children[0].style.width, '1000px');
   assert.equal(calls.host.style['--office-viewer-viewport-width'], '320px');
   viewer.setZoom('fit-width');
   assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 0.64 });
-  assert.equal(calls.host.style.width, '1000px');
+  assert.equal(calls.host.style.width, '100%');
+  assert.equal(calls.host.shadowRoot.children[0].style.width, '1000px');
   container.width = 800;
   observers.at(-1).notify(800);
   flushFrames();
@@ -316,6 +324,68 @@ test('fixed zoom remains observable while the viewer is hidden', () => {
   viewer.destroy();
 });
 
+test('Excel measures available height on open without requiring a zoom call', async () => {
+  const calls = runtime({ contentZoom: true });
+  const container = new Element();
+  container.clientHeight = 700;
+  const viewer = createOfficeViewer(container);
+  await viewer.open(input('xlsx'));
+  assert.equal(calls.host.style['--office-viewer-viewport-height'], '700px');
+  assert.equal(calls.resized, 1);
+  assert.equal(container.children.length, 1, 'height probes never remain in caller DOM');
+  container.clientHeight = 0;
+  viewer.resize();
+  assert.equal(calls.host.style['--office-viewer-viewport-height'], undefined);
+  assert.equal(container.children.length, 1);
+  viewer.destroy();
+});
+
+test('content zoom keeps worksheet chrome at container size and follows height-only resizing', async () => {
+  const calls = runtime({ contentWidth: 2000, contentZoom: true });
+  const container = new Element();
+  container.clientHeight = 507;
+  const viewer = createOfficeViewer(container);
+  await viewer.open(input('xlsx'));
+  viewer.setZoom(0.5);
+  assert.equal(calls.contentScale, 0.5);
+  assert.equal(calls.host.shadowRoot.children[0].style.zoom, '1');
+  assert.equal(calls.host.style.width, '100%');
+  assert.equal(calls.host.shadowRoot.children[0].style.width, '100%');
+  assert.equal(calls.host.style['--office-viewer-viewport-height'], '507px');
+  container.clientHeight = 350;
+  observers.at(-1).notify(640, 350);
+  flushFrames();
+  assert.equal(calls.host.style['--office-viewer-viewport-height'], '350px');
+  viewer.setZoom('fit-width');
+  assert.equal(calls.contentScale, 0.32);
+  assert.equal(calls.host.style.width, '100%');
+  viewer.setZoom(2);
+  assert.equal(calls.contentScale, 2);
+  assert.equal(calls.host.shadowRoot.children[0].style.zoom, '1');
+  assert.equal(calls.rendered, 1);
+  viewer.destroy();
+});
+
+test('paged zoom keeps the surface at container width while preserving page layout and scale', async () => {
+  const calls = runtime();
+  const container = new Element();
+  const viewer = createOfficeViewer(container);
+  await viewer.open(input('docx'));
+  calls.host.shadowRoot.querySelectorAll = () => [{
+    getBoundingClientRect: () => ({ width: 400 * Number(calls.host.shadowRoot.children[0].style.zoom || 1) }),
+  }];
+  viewer.setZoom(0.5);
+  assert.equal(calls.host.style.width, '100%');
+  assert.equal(calls.host.shadowRoot.children[0].style.width, '1280px');
+  viewer.setZoom(2);
+  assert.equal(calls.host.style.width, '100%');
+  assert.equal(calls.host.shadowRoot.children[0].style.width, '400px');
+  viewer.setZoom('fit-width');
+  assert.equal(viewer.getZoom().scale, 1.6);
+  assert.equal(calls.rendered, 1);
+  viewer.destroy();
+});
+
 test('fit width follows active worksheet changes and ignores stale render notifications', async () => {
   const calls = runtime({ contentWidth: 1000 });
   const viewer = createOfficeViewer(new Element());
@@ -339,7 +409,7 @@ test('page fit uses document geometry even when the host is wider than the page'
   const viewer = createOfficeViewer(container);
   await viewer.open(input('docx'));
   calls.host.shadowRoot.querySelectorAll = () => [{
-    getBoundingClientRect: () => ({ width: 400 * Number(calls.host.style.zoom || 1) }),
+    getBoundingClientRect: () => ({ width: 400 * Number(calls.host.shadowRoot.children[0].style.zoom || 1) }),
   }];
   viewer.setZoom('fit-width');
   assert.deepEqual(viewer.getZoom(), { mode: 'fit-width', scale: 1.6 });

@@ -14,7 +14,7 @@ import {
   type OfficeZoom,
 } from '@office-view-suite/viewer-core';
 
-type Rendered = { stats: Record<string, number>; dispose(): void; resize?(): void; getContentWidth?(): number };
+type Rendered = { stats: Record<string, number>; dispose(): void; resize?(): void; getContentWidth?(): number; setZoom?(scale: number): void };
 type RuntimeAdapter = {
   open(request: OfficeOpenRequest): Promise<OfficeOpenResult & { document: unknown }>;
   render(host: HTMLElement, document: unknown, onError?: (error: OfficeViewerError) => void, onContentChange?: () => void): Rendered;
@@ -68,6 +68,11 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
   host.style.width = '100%';
   host.style.minWidth = '0';
   host.attachShadow({ mode: 'open' });
+  // 内容单独承担缩放，surface 始终按宿主的 100% 宽度布局。
+  const content = container.ownerDocument.createElement('div');
+  content.className = 'office-viewer-content';
+  content.style.width = '100%';
+  content.style.minWidth = '0';
   viewport.appendChild(host);
   container.appendChild(viewport);
 
@@ -82,32 +87,59 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
   let resizeObserver: ResizeObserver | undefined;
   let activeSession: AbortController | undefined;
   let lastWidth = container.getBoundingClientRect().width;
+  let lastHeight = container.clientHeight;
   let resizeFrame: number | undefined;
   let zoom: OfficeZoom = 1;
   let scale = 1;
   let customZoom = false;
 
+  const availableHeight = (): number => {
+    // 空百分比探针只在宿主有明确高度时展开，避免把 auto 内容高度反锁为固定高度。
+    const probe = container.ownerDocument.createElement('div');
+    probe.style.cssText = 'height:100%;width:0;min-height:0;max-height:none;flex:none;align-self:flex-start;margin:0;padding:0;border:0;visibility:hidden;pointer-events:none';
+    container.appendChild(probe);
+    try { return probe.clientHeight || 0; }
+    finally { probe.remove(); }
+  };
+
   const applyZoom = (): void => {
+    if (currentRendered?.setZoom) {
+      const height = availableHeight();
+      if (height > 0) host.style.setProperty('--office-viewer-viewport-height', `${height}px`);
+      else host.style.removeProperty('--office-viewer-viewport-height');
+    }
     if (!customZoom) return;
+    const renderedScale = Number(content.style.zoom) || 1;
     if (typeof zoom === 'number') scale = zoom;
     const width = viewport.clientWidth || container.getBoundingClientRect().width;
     if (width <= 0) return;
-    let contentWidth = currentRendered?.getContentWidth?.() ?? host.scrollWidth ?? width;
+    // 响应式幻灯片保留 100% 时的排版宽度，缩放只改变其视觉尺寸。
+    host.style.setProperty('--office-viewer-layout-width', `${width}px`);
+    let contentWidth = currentRendered?.getContentWidth?.() ?? content.scrollWidth ?? width;
     // Page-based renderers may center a fixed-width page outside the surface.
     // Its width is not fully represented by scrollWidth when it overflows left.
     if (!currentRendered?.getContentWidth) {
       let pageWidth = 0;
       for (const page of host.shadowRoot?.querySelectorAll<HTMLElement>('.page, .slide') ?? []) {
         const padding = page.parentElement ? getComputedStyle(page.parentElement) : undefined;
-        pageWidth = Math.max(pageWidth, page.getBoundingClientRect().width / scale
+        pageWidth = Math.max(pageWidth, page.getBoundingClientRect().width / renderedScale
           + (Number.parseFloat(padding?.paddingLeft ?? '') || 0) + (Number.parseFloat(padding?.paddingRight ?? '') || 0));
       }
       if (pageWidth > 0) contentWidth = pageWidth;
     }
     scale = zoom === 'fit-width' ? Math.min(4, Math.max(0.1, width / Math.max(1, contentWidth))) : zoom;
-    host.style.zoom = String(scale);
-    host.style.width = `${zoom === 'fit-width' ? width / scale : width}px`;
-    host.style.setProperty('--office-viewer-viewport-width', `${width / scale}px`);
+    if (currentRendered?.setZoom) {
+      // 表格只缩放单元格，标签和滚动视口保持宿主的实际宽高。
+      content.style.zoom = '1';
+      content.style.width = '100%';
+      host.style.setProperty('--office-viewer-viewport-width', `${width}px`);
+      currentRendered.setZoom(scale);
+    } else {
+      content.style.zoom = String(scale);
+      // 缩小时铺满可用宽度，放大时给完整页面保留可横向滚动的空间。
+      content.style.width = `${Math.max(contentWidth, width / scale)}px`;
+      host.style.setProperty('--office-viewer-viewport-width', `${width / scale}px`);
+    }
   };
 
   const emit = (event: OfficeViewerEvent): void => {
@@ -127,6 +159,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
     currentAdapter = undefined;
     rendered?.dispose();
     adapter?.clear?.();
+    content.replaceChildren();
     host.shadowRoot?.replaceChildren();
   };
 
@@ -161,9 +194,13 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       }, () => {
         if (generation === renderGeneration) resizeCurrent();
       });
+      // 保持同一个 Shadow DOM，渲染器原有的节点引用与样式作用域不变。
+      content.replaceChildren(...host.shadowRoot!.childNodes);
+      host.shadowRoot!.replaceChildren(content);
       applyZoom();
-      if (customZoom) currentRendered.resize?.();
+      if (customZoom || currentRendered.setZoom) currentRendered.resize?.();
       lastWidth = container.getBoundingClientRect().width;
+      lastHeight = container.clientHeight;
     } catch (error) {
       throw asViewerError(error, 'RENDER_FAILED');
     }
@@ -176,6 +213,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       if (currentRendered?.resize) currentRendered.resize();
       else renderCurrent();
       lastWidth = container.getBoundingClientRect().width;
+      lastHeight = container.clientHeight;
     } catch (error) {
       emit({ type: 'statechange', state: 'error' });
       emit({ type: 'error', error: asViewerError(error, 'RENDER_FAILED') });
@@ -187,10 +225,12 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       // Use the same box for the initial/rendered width and observations. Mixing
       // contentRect with getBoundingClientRect loops on hosts with padding/borders.
       const width = container.getBoundingClientRect().width;
+      const height = container.clientHeight;
       // Rendering changes the container's height; that must never trigger a render loop.
       if (width <= 0) { lastWidth = 0; return; }
-      if (Math.abs(width - lastWidth) < 0.5) return;
+      if (Math.abs(width - lastWidth) < 0.5 && (!currentRendered?.setZoom || height === lastHeight)) return;
       lastWidth = width;
+      lastHeight = height;
       if (state !== 'ready' || resizeFrame !== undefined) return;
       resizeFrame = requestAnimationFrame(() => {
         resizeFrame = undefined;

@@ -159,10 +159,11 @@ export function renderVirtualSheet(sheet: ExcelSheet, element: HTMLElement, view
     const { columns, rows, cells, merges, overlays } = layout;
     grid.style.width = `${layout.width}px`;
     grid.style.height = `${layout.height}px`;
-    // All dimensions are local CSS pixels, including when an ancestor uses CSS zoom.
-    const w = viewport.clientWidth, h = viewport.clientHeight;
-    lastWidth = w; lastHeight = h;
-    const sx = viewport.scrollLeft, sy = viewport.scrollTop;
+    // 滚动视口不缩放；可见区域、冻结窗格和绘图统一换算回网格局部像素。
+    const zoom = Number.parseFloat(win.getComputedStyle(grid).zoom) || 1;
+    const w = viewport.clientWidth / zoom, h = viewport.clientHeight / zoom;
+    lastWidth = viewport.clientWidth; lastHeight = viewport.clientHeight;
+    const sx = viewport.scrollLeft / zoom, sy = viewport.scrollTop / zoom;
     layer.style.left = `${sx}px`; layer.style.top = `${sy}px`;
     layer.style.width = `${w}px`; layer.style.height = `${h}px`;
     const frozenColumns = Math.max(0, Math.min(columns.count, sheet.frozenColumns));

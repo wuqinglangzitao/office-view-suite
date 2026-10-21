@@ -2,14 +2,18 @@
 export const SHADOW_CSS = `
 :host { display: block; }
 
-.workbook { display: flex; flex-direction: column; gap: 12px; }
+.workbook { display: flex; flex-direction: column; gap: 12px; width: 100%; }
+.workbook--bounded { height: var(--office-excel-workbook-height); min-height: 0; }
+.workbook--bounded > .sheet-tabs { flex: 0 0 auto; }
+.workbook--bounded .sheet-pages, .workbook--bounded .sheet:not([hidden]) { display: flex; flex: 1 1 0; flex-direction: column; min-height: 0; }
+.workbook--bounded .grid-wrap { flex: 1 1 0; min-height: 0; max-height: none; }
 .sheet-tabs { position: sticky; top: 0; z-index: 20; display: flex; gap: 0; overflow-x: auto; padding: 6px 0 0; background: #f6f7f9; border-bottom: 1px solid #c9d0d7; }
 .sheet-tab { flex: 0 0 auto; min-height: 34px; padding: 6px 14px; border: 0; border-right: 1px solid #d7dce1; border-bottom: 2px solid transparent; background: #eef1f4; color: #30363d; cursor: pointer; }
 .sheet-tab[aria-selected="true"] { background: #fff; border-bottom-color: #217346; color: #111; font-weight: 600; }
 .sheet[hidden] { display: none; }
 
-.grid-wrap { overflow: auto; max-height: 75vh; max-width: var(--office-viewer-viewport-width, none); box-sizing: border-box; background: #fff; border: 1px solid #d0d7de; border-radius: 0; }
-.grid { display: grid; gap: 0; width: max-content;
+.grid-wrap { overflow: auto; max-height: 63vh; max-width: var(--office-viewer-viewport-width, none); box-sizing: border-box; background: #fff; border: 1px solid #d0d7de; border-radius: 0; }
+.grid { display: grid; gap: 0; width: max-content; zoom: var(--office-excel-scale, 1);
   border-left: 1px solid #e4e8ec; border-top: 1px solid #e4e8ec; }
 
 .cell {

@@ -19,12 +19,15 @@ const run = (bin, args, cwd = consumer) => execFileSync(bin, args, { cwd, stdio:
 for (const name of packages) run('pnpm', ['pack', '--pack-destination', tarballs], resolve(root, 'packages', name));
 const dependencies = {};
 for (const name of packages) {
-  const file = `office-view-suite-${name}-0.1.0.tgz`;
+  // 打包文件名跟随包自身版本，补丁发布无需同步维护测试脚本。
+  const metadata = JSON.parse(await readFile(resolve(root, 'packages', name, 'package.json')));
+  const file = `office-view-suite-${name}-${metadata.version}.tgz`;
   const listing = execFileSync('tar', ['-tzf', resolve(tarballs, file)], { encoding: 'utf8' });
   if (/\/(?:node_modules|vendor|target|samples|src)\//m.test(listing)) throw new Error(`Unexpected package files: ${name}`);
   const packedLicense = execFileSync('tar', ['-xOf', resolve(tarballs, file), 'package/dist/LICENSE']);
   if (!packedLicense.equals(projectLicense)) throw new Error(`Packed project license differs from source: ${name}`);
   const packedMetadata = JSON.parse(execFileSync('tar', ['-xOf', resolve(tarballs, file), 'package/package.json'], { encoding: 'utf8' }));
+  if (packedMetadata.name !== metadata.name || packedMetadata.version !== metadata.version) throw new Error(`Packed package metadata differs from source: ${name}`);
   if (packedMetadata.license !== 'Apache-2.0') throw new Error(`Missing Apache-2.0 package metadata: ${name}`);
   if (name === 'viewer-pdf') {
     const entries = new Set(listing.trim().split('\n'));

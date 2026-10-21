@@ -36,6 +36,7 @@ export interface RenderStats {
 export function renderExcelInto(host: HTMLElement, doc: ExcelDoc, onError?: (error: Error) => void, onContentChange?: () => void): {
   stats: RenderStats;
   resize(): void;
+  setZoom(scale: number): void;
   getContentWidth(): number;
   dispose(): void;
 } {
@@ -68,12 +69,23 @@ export function renderExcelInto(host: HTMLElement, doc: ExcelDoc, onError?: (err
   let current = -1;
   let active: SheetView | undefined;
   let disposed = false;
+  let zoom = 1;
+
+  const resizeViewport = () => {
+    // 有明确高度时由弹性布局分配标签之外的空间，无约束时保留内容高度。
+    const css = host.ownerDocument.defaultView!.getComputedStyle(host);
+    const height = Number.parseFloat(css.getPropertyValue('--office-viewer-viewport-height'));
+    const bounded = Number.isFinite(height) && height > 0;
+    root.classList.toggle('workbook--bounded', bounded);
+    if (bounded) root.style.setProperty('--office-excel-workbook-height', `${height}px`);
+    else root.style.removeProperty('--office-excel-workbook-height');
+  };
 
   const mount = (index: number) => {
     if (disposed || index === current || !doc.sheets[index]) return;
     const previous = active;
     if (active) {
-      positions.set(current, { top: active.viewport.scrollTop, left: active.viewport.scrollLeft });
+      positions.set(current, { top: active.viewport.scrollTop / zoom, left: active.viewport.scrollLeft / zoom });
     }
     const cache = caches.get(index) ?? {};
     caches.set(index, cache);
@@ -82,11 +94,12 @@ export function renderExcelInto(host: HTMLElement, doc: ExcelDoc, onError?: (err
       next = renderSheet(doc.sheets[index], cache, onError, onContentChange);
       next.element.dataset.sheetIndex = String(index);
       sheets.replaceChildren(next.element);
+      resizeViewport();
       next.resize();
       const position = positions.get(index);
       if (position) {
-        next.viewport.scrollTop = position.top;
-        next.viewport.scrollLeft = position.left;
+        next.viewport.scrollTop = position.top * zoom;
+        next.viewport.scrollLeft = position.left * zoom;
         next.resize();
       }
     } catch (error) {
@@ -141,7 +154,23 @@ export function renderExcelInto(host: HTMLElement, doc: ExcelDoc, onError?: (err
 
   return {
     stats: { sheets: doc.sheets.length, rows, cols, merges, images, shapes },
-    resize() { if (!disposed) active?.resize(); },
+    resize() {
+      if (disposed) return;
+      resizeViewport();
+      active?.resize();
+    },
+    setZoom(scale) {
+      if (disposed || scale === zoom) return;
+      const top = (active?.viewport.scrollTop ?? 0) / zoom;
+      const left = (active?.viewport.scrollLeft ?? 0) / zoom;
+      zoom = scale;
+      // 只缩放网格，标签与滚动视口始终使用宿主的实际宽高。
+      root.style.setProperty('--office-excel-scale', String(scale));
+      if (active) {
+        active.viewport.scrollTop = top * scale;
+        active.viewport.scrollLeft = left * scale;
+      }
+    },
     getContentWidth() { return disposed ? 0 : active?.getContentWidth() ?? 0; },
     dispose() {
       disposed = true;

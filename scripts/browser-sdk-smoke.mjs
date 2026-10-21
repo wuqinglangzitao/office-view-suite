@@ -68,17 +68,110 @@ try {
       if (fixed.mode !== 'fixed' || fixed.scale !== 1.5) throw new Error('Fixed zoom did not persist');
       const scaledWidth = contentWidth();
       if (Math.abs(scaledWidth / originalWidth - 1.5) > 0.05) throw new Error(`Zoom geometry mismatch: ${originalWidth} -> ${scaledWidth}`);
+      if (surface.style.width !== '100%' || Math.abs(surface.getBoundingClientRect().width - surface.parentElement.clientWidth) > 1) throw new Error(`Surface width changed while zooming ${kind}`);
       viewer.setZoom('fit-width');
       await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       const fit = viewer.getZoom();
       if (fit.mode !== 'fit-width' || !Number.isFinite(fit.scale) || fit.scale <= 0) throw new Error('Invalid fit width scale');
       const fitted = surface.shadowRoot.querySelector(kind === 'excel' ? '.grid' : selector).getBoundingClientRect().width;
       const available = surface.parentElement.clientWidth;
+      if (Math.abs(surface.getBoundingClientRect().width - available) > 1) throw new Error(`Surface fit width mismatch: ${kind}`);
       if (fit.scale > 0.1 && fitted > available + 2) throw new Error(`Fit width overflows: ${fitted} > ${available}`);
       viewer.setZoom(1);
       return { fixed, fit, originalWidth, scaledWidth, fitted, available };
     }, kind);
     results.push({ test: `preview-zoom-${kind}`, ...zoom });
+    if (kind === 'excel') {
+      const width = await page.evaluate(async () => {
+        const viewer = window.officeFixture.viewer;
+        const container = document.querySelector('#viewer');
+        const surface = container.querySelector('.office-viewer-surface');
+        const workbook = surface.shadowRoot.querySelector('.workbook');
+        const measure = () => workbook.getBoundingClientRect().width;
+        const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        const previous = container.style.width;
+        const defaultWidth = measure();
+        if (Math.abs(defaultWidth - surface.clientWidth) > 1) throw new Error(`Default workbook width: ${defaultWidth} != ${surface.clientWidth}`);
+        try {
+          // 工作簿跟随嵌入容器而非视口；缩放仅改变单元格尺寸。
+          const widths = [];
+          for (const containerWidth of [640, 480]) {
+            container.style.width = `${containerWidth}px`;
+            viewer.resize();
+            for (const scale of [0.5, 1, 1.5, 2]) {
+              viewer.setZoom(scale);
+              await settle();
+              const width = measure();
+              const expected = surface.parentElement.clientWidth;
+              if (Math.abs(width - expected) > 1 || Math.abs(surface.getBoundingClientRect().width - expected) > 1) throw new Error(`Container width mismatch at ${scale}x: ${width} != ${expected}`);
+              widths.push({ containerWidth, scale, width });
+            }
+          }
+          return { defaultWidth, widths };
+        } finally {
+          container.style.width = previous;
+          viewer.setZoom(1);
+          viewer.resize();
+        }
+      });
+      results.push({ test: 'excel-workbook-container-width', ...width });
+      const height = await page.evaluate(async () => {
+        const host = document.createElement('div');
+        host.style.cssText = 'width:640px;height:740px;min-height:0;padding:9px 7px;border:3px solid transparent;box-sizing:border-box';
+        document.body.appendChild(host);
+        const viewer = window.officeFixture.create(host);
+        const settle = () => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        try {
+          await viewer.open(await window.officeFixture.sample('excel'));
+          const surface = host.querySelector('.office-viewer-surface');
+          const workbook = surface.shadowRoot.querySelector('.workbook');
+          const measure = () => {
+            const sheet = workbook.querySelector('.sheet');
+            const grid = sheet.querySelector('.grid-wrap');
+            const css = getComputedStyle(host);
+            const available = host.clientHeight - parseFloat(css.paddingTop) - parseFloat(css.paddingBottom);
+            const gap = parseFloat(getComputedStyle(workbook).rowGap) || 0;
+            const remaining = available - workbook.querySelector('.sheet-tabs').getBoundingClientRect().height - gap;
+            const height = grid.getBoundingClientRect().height;
+            if (!workbook.classList.contains('workbook--bounded') || Math.abs(workbook.getBoundingClientRect().height - available) > 1
+              || Math.abs(sheet.getBoundingClientRect().height - remaining) > 1 || Math.abs(height - remaining) > 1) {
+              throw new Error(`Excel remaining height mismatch: ${height} != ${remaining}`);
+            }
+            return { available, remaining, height };
+          };
+          // 初次打开不依赖 setZoom；padding 不应导致高度反馈增长。
+          const initial = measure();
+          const sizes = [];
+          for (const height of [420, 740]) {
+            host.style.height = `${height}px`;
+            viewer.resize();
+            for (const scale of [0.5, 1, 2]) {
+              viewer.setZoom(scale);
+              await settle();
+              sizes.push({ scale, ...measure() });
+            }
+          }
+          host.style.display = 'none';
+          viewer.resize();
+          await settle();
+          host.style.display = 'block';
+          await settle();
+          await settle();
+          const shown = measure();
+          // auto/min-height 宿主继续按内容排版，不能锁死为其当前内容高度。
+          host.style.height = 'auto';
+          host.style.minHeight = '480px';
+          viewer.setZoom(1);
+          await settle();
+          if (workbook.classList.contains('workbook--bounded')) throw new Error('Auto-height workbook became fixed');
+          const automatic = host.getBoundingClientRect().height;
+          for (let i = 0; i < 4; i++) { viewer.resize(); await settle(); }
+          if (Math.abs(host.getBoundingClientRect().height - automatic) > 1) throw new Error('Auto-height resize feedback loop');
+          return { initial, sizes, shown, automatic };
+        } finally { viewer.destroy(); host.remove(); }
+      });
+      results.push({ test: 'excel-remaining-height-and-auto-height', ...height });
+    }
   }
   // Exercise real IntersectionObserver clipping, bitmap eviction and repainting.
   await page.evaluate(async () => {

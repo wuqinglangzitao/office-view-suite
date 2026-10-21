@@ -11,9 +11,11 @@ const consumer = await realpath(await mkdtemp(resolve(tmpdir(), 'office-vue2-con
 const fixture = resolve(root, 'fixtures/vue2-vite');
 const names = ['viewer-core', 'viewer-word', 'viewer-excel', 'viewer-ppt', 'viewer-pdf', 'viewer'];
 const metadata = JSON.parse(await readFile(resolve(fixture, 'package.json')));
-const dependencies = Object.fromEntries(names.map(name => [
-  `@office-view-suite/${name}`, `file:./tarballs/office-view-suite-${name}-0.1.0.tgz`,
-]));
+// 使用每个 SDK 包的真实版本，保持 Vue 2 消费端与本轮打包产物一致。
+const dependencies = Object.fromEntries(await Promise.all(names.map(async name => {
+  const { version } = JSON.parse(await readFile(resolve(root, 'packages', name, 'package.json')));
+  return [`@office-view-suite/${name}`, `file:./tarballs/office-view-suite-${name}-${version}.tgz`];
+})));
 const run = (args) => execFileSync('pnpm', args, { cwd: consumer, stdio: 'inherit' });
 for (const file of ['index.html', 'vite.config.js', 'src']) {
   await cp(resolve(fixture, file), resolve(consumer, file), { recursive: true });

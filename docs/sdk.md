@@ -4,7 +4,19 @@ SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM，在浏览器内解析文�
 
 ## 构建与安装
 
-当前仓库已提供可打包的 ESM 包，尚未发布到 npm。首次从源码构建：
+SDK 的 ESM 包通过前端私服分发，公共入口会自动安装其余五个包：
+
+```sh
+pnpm add @office-view-suite/viewer@0.1.2 --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+```
+
+建议在消费者项目的 `.npmrc` 添加作用域配置，让传递依赖也从私服解析；不要在仓库中保存登录凭据：
+
+```ini
+@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+```
+
+首次从源码构建：
 
 ```sh
 pnpm install
@@ -15,7 +27,16 @@ pnpm test
 pnpm test:packages
 ```
 
-`pnpm test:packages` 会将六个包打成 `.tgz`，在系统临时目录建立独立项目，仅从这些安装包安装运行时依赖，再执行类型检查和生产构建。临时项目路径记录在 `output/packed-consumer.json`。在包尚未发布时，跨项目安装需要提供全部六个安装包；该脚本给出了完整的本地依赖和 `pnpm.overrides` 配置。
+`pnpm test:packages` 会将六个包打成 `.tgz`，在系统临时目录建立独立项目，仅从这些安装包安装运行时依赖，再执行类型检查和生产构建。临时项目路径记录在 `output/packed-consumer.json`。离线交付时需要提供全部六个安装包；该脚本给出了完整的本地依赖和 `pnpm.overrides` 配置。
+
+发布目标为各包 `publishConfig.registry` 中的 `npm-hosted`；安装使用聚合仓库 `npm-group`。发布前完成构建、打包和浏览器校验，再按 core、word、excel、ppt、pdf、viewer 的顺序发布验证过的 tarball，避免主入口引用尚未发布的依赖。发布鉴权沿用用户级 npm 配置。npm 8 会优先采用作用域 registry，发布时须同时覆盖该配置：
+
+```sh
+npm publish /path/to/office-view-suite-viewer-core-0.1.2.tgz \
+  --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/ \
+  --@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/ \
+  --ignore-scripts
+```
 
 Rust 源码和各自的 Cargo.lock 位于 `packages/viewer-{word,excel,ppt,pdf}/rs/`，生成的 WASM/glue 位于同包的 `src/wasm/`。`pnpm wasm` 使用 `--locked` 构建并记录源码、vendor、仓库 Cargo 配置、工具链声明、构建脚本及输出文件的指纹。SDK 构建会拒绝缺失或过期的产物，并提示 `pnpm wasm:<格式>`；TypeScript 修改无需重建 WASM。指纹用于防止本地源码与生成产物错配，不是跨平台逐字节可复现构建的证明。PDFium 本体是 `third_party/pdfium/` 中的上游预编译产物，`wasm:pdf` 只编译本项目 Rust glue。
 
@@ -112,7 +133,11 @@ console.log(viewer.getCapabilities()); // { zoom: true, fitWidth: true }
 
 默认比例为 1。缩放仅作用于 SDK 自己创建的内容，不修改宿主容器样式；非法比例返回 `INVALID_SOURCE`，销毁后设置比例返回 `DESTROYED`。这些接口只控制预览，不提供搜索、单元格/范围定位、选区编辑、打印或导出。
 
-`fit-width` 同样受 0.1–4 的比例范围约束；超宽内容缩到 10% 后仍可能需要横向滚动。SDK 内容区负责缩放后的横向溢出，宿主页面负责外层纵向滚动；Excel 表格保留自己的滚动区域。PDF 当前通过 CSS 放大已有 Canvas，较大比例可能降低文字清晰度。
+`fit-width` 同样受 0.1–4 的比例范围约束；超宽内容缩到 10% 后仍可能需要横向滚动。SDK 内容区负责缩放后的横向溢出，宿主页面负责外层纵向滚动。缩小时页面在可用宽度内居中，放大后可滚动查看完整页面；缩放不改变文档的原始排版宽度。
+
+Excel 仅缩放单元格和绘图，工作表标签及滚动区保持容器宽高。有明确高度（包括 flex 分配高度）的宿主中，工作簿、工作表和滚动区逐层填满标签之外的剩余空间，不再受 `63vh` 限制；单元格保留原始行高。无明确高度的宿主继续按内容排版，滚动区最大为 `63vh`。首次打开、窗口调整及隐藏后显示均重新测量；缩放后重新计算可见行列，保留阅读位置。旧内部变量 `--office-excel-grid-height` 已移除，剩余空间由弹性布局分配。PDF 当前通过 CSS 放大已有 Canvas，较大比例可能降低文字清晰度。
+
+`.office-viewer-surface` 和 Excel `.workbook` 均使用 `width: 100%`，跟随嵌入容器宽度。分页文档通过内部内容层缩放，表格只缩放网格；缩放和容器尺寸变化均保持 surface 与工作簿填满可用宽度。业务无需设置视口宽度或额外覆盖变量。
 
 Excel 只挂载当前工作表，往返切换保留各表滚动位置。大表使用可见区域渲染；当前视口以外的内容仍可通过滚动查看，但不常驻 DOM，因此宿主不应通过遍历 DOM 提取整份文件数据。
 
