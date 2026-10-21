@@ -18,4 +18,6 @@ output/
 fixtures/*/public/samples/
 fixtures/vue2-vite/public/office-assets/
 fixtures/vue2-vite/public/office-licenses/
-.omx/state/
+
+# Local agent state and plans
+.omx/

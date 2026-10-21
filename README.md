@@ -4,9 +4,11 @@
 
 文件由 Worker 与 Rust/WASM 在浏览器内解析，SDK 不上传文档内容。通过原生 DOM、Shadow DOM 和 Canvas 渲染，无需 iframe；支持多实例、取消加载和组件卸载时释放资源。
 
-当前提供源码及可本地打包的 ESM 包，**尚未发布到 npm**。项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。
+SDK 当前版本为 **0.1.2**，ESM 包通过公司前端私服分发，也支持从源码构建和离线安装。业务项目直接调用 SDK；文件选择、工具栏和下载交互由宿主应用提供。
 
-[快速开始](#快速开始) · [SDK 接入](#sdk-接入) · [开发与验证](#开发与验证) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
+项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。源码入口：[公司 GitLab](http://git.dev.e6gpshk.com/202009271967/office-view-suite) · [GitHub](https://github.com/wuqinglangzitao/office-view-suite)。
+
+[SDK 接入](#sdk-接入) · [Vue 2 + Vite](docs/vue2.md) · [缩放与容器布局](#缩放与容器布局) · [源码开发](#源码开发) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
 
 ## 支持格式
 
@@ -17,45 +19,51 @@
 | PowerPoint | `.pptx` | DOM / SVG 渲染，按容器宽度适配 |
 | PDF | `.pdf` | PDFium + Canvas，按可见页面懒渲染，离屏回收位图 |
 
-不支持旧版 `.xls`、`.ppt`。预览效果受文档特性、可用字体和解析器支持范围影响，不保证与 Microsoft Office 像素级一致。
-
-## 快速开始
-
-### 环境要求
-
-- Node.js **22.15+**、pnpm **7.33.7**。
-- Rust **1.89.0**，仓库通过 [rust-toolchain.toml](rust-toolchain.toml) 固定工具链及 WASM 目标。
-- `wasm-pack`：编译 Rust/WASM；SDK 构建还会使用 Cargo 收集依赖许可。
-
-### 启动演示
-
-在仓库根目录执行：
-
-```sh
-pnpm install
-pnpm wasm       # 首次检出或修改 Rust 解析器后执行
-pnpm dev:sdk    # 构建 SDK 并启动多实例接入示例
-```
-
-打开终端中 Vite 输出的地址。也可以启动单格式演示：
-
-| 演示 | 命令 |
-| --- | --- |
-| Word | `pnpm dev:word` |
-| Excel | `pnpm dev:excel` |
-| PowerPoint | `pnpm dev:ppt` |
-| PDF | `pnpm dev:pdf` |
-| Vue 2.7 接入示例 | `pnpm dev:vue2` |
-
-这些开发命令会先构建 SDK。修改 TypeScript 源码后，执行 `pnpm build:sdk` 刷新演示应用使用的产物，再刷新页面。修改 Rust、vendor、Cargo.lock、工具链声明或 WASM 构建脚本后，应先运行 `pnpm wasm`；SDK 构建会拒绝缺失、过期或被修改的 WASM 产物，并提示对应的重建命令。
+`.docm`、`.xlsm` 支持文档内容预览，不执行 VBA 宏。不支持旧版 `.xls`、`.ppt`。预览效果受文档特性、可用字体和解析器支持范围影响，不保证与 Microsoft Office 像素级一致；Word 分页和复杂排版等已知差异见[预览差异跟踪](docs/known-preview-differences.md)。
 
 ## SDK 接入
 
-公共入口为 `@office-view-suite/viewer`，可从前端私服安装；其余五个包会自动安装。作用域配置、离线 `.tgz` 交付和源码构建见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
+### 安装
+
+公共入口为 `@office-view-suite/viewer`，会自动安装其余五个 SDK 包。安装已发布的包不需要 Rust 或 `wasm-pack`；需能够访问公司私服。
+
+在业务项目的 `.npmrc` 添加作用域配置：
+
+```ini
+@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+```
 
 ```sh
-pnpm add @office-view-suite/viewer@0.1.2 --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+pnpm add @office-view-suite/viewer@0.1.2
 ```
+
+鉴权沿用用户级 npm 配置，不要将凭据写入项目仓库。离线 `.tgz` 安装、源码打包及私服发布方式见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
+
+### Vite 配置
+
+将以下配置合并到业务项目的 `vite.config.ts`，保留原有框架插件：
+
+```ts
+import { defineConfig } from 'vite';
+
+export default defineConfig({
+  optimizeDeps: {
+    exclude: [
+      '@office-view-suite/viewer',
+      '@office-view-suite/viewer-core',
+      '@office-view-suite/viewer-word',
+      '@office-view-suite/viewer-excel',
+      '@office-view-suite/viewer-ppt',
+      '@office-view-suite/viewer-pdf',
+    ],
+  },
+  build: { target: 'es2022' },
+});
+```
+
+开发模式排除依赖预打包，确保 Worker/WASM 保持正确的相对路径；生产构建由 Vite 输出这些资源。修改配置后重启开发服务器，必要时使用 `vite --force` 刷新旧缓存。Vue 2.7 的完整配置与可复制组件见 [Vue 2 + Vite 接入](docs/vue2.md)。
+
+### 最小用法
 
 在页面中准备文件选择框和具有可测量宽度的容器：
 
@@ -77,21 +85,95 @@ const input = document.querySelector<HTMLInputElement>('#office-file')!;
 const viewer = createOfficeViewer(container);
 
 // 接收后台渲染错误，例如 PDF 后续页面加载失败。
-viewer.on(event => {
+const unsubscribe = viewer.on(event => {
   if (event.type === 'error') console.error(event.error);
 });
 
-input.addEventListener('change', () => {
+const onChange = () => {
   const file = input.files?.[0];
   if (file) {
     viewer.open({ bytes: file, name: file.name }).catch(console.error);
   }
-});
+};
+input.addEventListener('change', onChange);
+
+// 页面或组件卸载时调用。
+export function disposePreview() {
+  input.removeEventListener('change', onChange);
+  unsubscribe();
+  viewer.destroy();
+}
 ```
 
-`bytes` 接受 `File` / `Blob`、`ArrayBuffer` 或 `Uint8Array`。同一实例再次 `open()` 会取消前一次加载；`clear()` 清空预览，`resize()` 可在隐藏容器重新显示后调用。React / Vue 等框架在挂载后创建实例，在卸载时调用 `viewer.destroy()`，并清理宿主自己注册的监听。
+`bytes` 接受 `File` / `Blob`、`ArrayBuffer` 或 `Uint8Array`。预览远程附件时，由业务应用完成鉴权与 `fetch`，再将文件数据传入 `open()`。同一实例再次 `open()` 会取消前一次加载；`clear()` 清空预览，`resize()` 可在隐藏容器重新显示后调用。React / Vue 等框架在挂载后创建实例，在卸载时调用清理函数。
 
-Vite 生产构建可处理包内 Worker/WASM 资源；开发模式需将六个 SDK 包加入 `optimizeDeps.exclude`，保留资源相对路径。已实测的组件和配置见 [Vue 2 + Vite 接入](docs/vue2.md)。自行部署静态资源或使用 CDN 时，需要保留资源目录并配置 URL、CORS 与 CSP。完整 API、取消操作、原生 ESM 及部署示例见 [SDK 接入文档](docs/sdk.md)。
+自行部署静态资源或使用 CDN 时，需要保留资源目录并配置 URL、CORS 与 CSP，同时部署第三方许可材料。完整 API、取消操作、原生 ESM 及部署示例见 [SDK 接入文档](docs/sdk.md)。
+
+## 缩放与容器布局
+
+业务工具栏可通过以下接口设置比例、显示当前百分比和还原：
+
+```ts
+viewer.setZoom(0.8);                         // 80%，支持 10%–400%
+console.log(`${Math.round(viewer.getZoom().scale * 100)}%`);
+viewer.setZoom(1);                           // 还原到 100%
+viewer.setZoom('fit-width');                 // 按需适应容器宽度
+```
+
+缩放保留文档原始排版；Excel 只缩放单元格和绘图，工作表标签与滚动视口保持容器尺寸。SDK 内容区 `.office-viewer-surface` 和 Excel `.workbook` 默认宽度均为 `100%`，跟随宿主容器。
+
+弹窗中需要让 Excel 填满工具栏之外的剩余高度时，为外层分配高度，并让预览容器参与 flex 布局：
+
+```css
+.preview-dialog-body {
+  display: flex;
+  flex-direction: column;
+  height: 75vh;
+  min-height: 0;
+}
+
+.preview-toolbar { flex: none; }
+
+#office-preview {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+```
+
+该布局中，工具栏和预览容器应为 `.preview-dialog-body` 的直接子元素。Excel 在有明确高度的宿主中填满工作表标签之外的剩余空间；没有明确高度时，网格滚动区最大高度为 `63vh`。不再使用 `--office-excel-grid-height`，也无需设置固定像素高度或视口宽度。大表按可见区域渲染，滚动可查看全部内容。
+
+## 源码开发
+
+### 环境要求
+
+- Node.js **22.15+**、pnpm **7.33.7**。
+- Rust **1.89.0**，仓库通过 [rust-toolchain.toml](rust-toolchain.toml) 固定工具链及 WASM 目标。
+- `wasm-pack`：编译 Rust/WASM；SDK 构建还会使用 Cargo 收集依赖许可。
+
+### 启动演示
+
+```sh
+git clone http://git.dev.e6gpshk.com/202009271967/office-view-suite.git
+cd office-view-suite
+pnpm install
+pnpm wasm       # 首次检出或修改 Rust 构建输入后执行
+pnpm dev:sdk    # 构建 SDK 并启动多实例接入示例
+```
+
+打开终端中 Vite 输出的地址。也可以启动单格式演示：
+
+| 演示 | 命令 |
+| --- | --- |
+| Word | `pnpm dev:word` |
+| Excel | `pnpm dev:excel` |
+| PowerPoint | `pnpm dev:ppt` |
+| PDF | `pnpm dev:pdf` |
+| Vue 2.7 接入示例 | `pnpm dev:vue2` |
+
+这些开发命令会先构建 SDK。修改 TypeScript 源码后，执行 `pnpm build:sdk` 刷新演示应用使用的产物，再刷新页面。修改 Rust、vendor、Cargo.lock、工具链声明或 WASM 构建脚本后，应先运行 `pnpm wasm`；SDK 构建会拒绝缺失、过期或被修改的 WASM 产物，并提示对应的重建命令。
 
 ## 仓库结构
 
@@ -127,6 +209,9 @@ SDK 源码和引擎构建归属 `packages/`，构建不依赖演示应用目录�
 | `pnpm test:packages` | 打包、核对许可材料，在独立临时项目安装并构建 |
 | `pnpm test:vue2` | 独立安装包的 Vue 2 开发/生产浏览器验证（需先运行 test:packages） |
 | `pnpm test:excel` | Excel 大表性能、工作表切换与布局回归（需要 Playwright） |
+| `pnpm test:word` | Word 段落、列表、分节与渐进分页回归（需要 Playwright） |
+| `pnpm test:word:tables` | Word 表格样式、合并单元格与跨页表头回归（需要 Playwright） |
+| `pnpm test:word:tabs` | Word 制表位与对齐回归（需要 Playwright） |
 | `pnpm test:word:display` | Word 展示数据、字段与布局回归（需要 Playwright） |
 | `pnpm test:word:charts` | Word SVG 图表、数值与降级数据展示回归（需要 Playwright） |
 | `pnpm test:ppt:display` | PPT 渐变、字号、表格、层级、变换与裁剪回归（需要 Playwright） |

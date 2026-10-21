@@ -16,7 +16,13 @@ pnpm dev:vue2
 
 ## 安装与 Vite 配置
 
-SDK 尚未发布 npm。先按 [构建与安装](sdk.md#构建与安装) 生成六个安装包，复制验证消费者的 `tarballs/`，将其 `dependencies` 和 `pnpm.overrides` 中的六个本地包映射合并到业务项目，再执行 `pnpm install`。已有 Vue 应用应保留自己的 Vue 依赖。
+SDK 当前通过公司前端私服分发。先按 [构建与安装](sdk.md#构建与安装) 配置项目 `.npmrc` 中的 `@office-view-suite` 作用域 registry，再安装公共入口：
+
+```sh
+pnpm add @office-view-suite/viewer@0.1.2
+```
+
+其余五个 SDK 包会自动安装，已有 Vue 应用应保留自己的 Vue 依赖。离线交付时，也可按上述文档生成六个安装包，复制验证消费者的 `tarballs/`，将其 `dependencies` 和 `pnpm.overrides` 中的六个本地包映射合并到业务项目，再执行 `pnpm install`。
 
 在已有 Vite 配置中合并以下内容：
 

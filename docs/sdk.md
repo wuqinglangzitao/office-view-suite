@@ -222,7 +222,7 @@ Vue 2.7.16 + Vite 6.4.4 + `@vitejs/plugin-vue2` 2.3.4 已通过独立消费者�
 
 复用现有 Rust 解析器和 DOM 渲染器，因此不承诺和 Microsoft Office 像素级一致；字体是否安装、Office 特性覆盖和原解析器限制仍然适用。
 
-浏览器回归复用已安装的 Playwright，不增加 SDK 运行时依赖：先运行 `pnpm test:packages`，再运行 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:browser`。截图和结果位于 `output/playwright/`。本次只准备本地安装包，未发布 npm。
+浏览器回归复用已安装的 Playwright，不增加 SDK 运行时依赖：先运行 `pnpm test:packages`，再运行 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:browser`。截图和结果位于 `output/playwright/`。验证脚本只生成并校验本地安装包，不会自动发布到私服或 npm 公共仓库。
 
 `pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，当前覆盖 6 个样本共 46 页／工作表，包括架构评审 PPT 的全部 39 页；另执行 9 组 Word 缩放与渐进分页检查。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。当前未通过的样例、预期界面调整及待核查项见[预览差异跟踪](known-preview-differences.md)。
 
