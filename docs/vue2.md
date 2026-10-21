@@ -42,11 +42,19 @@ export default defineConfig({
       '@office-view-suite/viewer-pdf',
     ],
   },
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    assetsInlineLimit(filePath) {
+      if (filePath.includes('/node_modules/@office-view-suite/')) return false;
+      return undefined;
+    },
+  },
 });
 ```
 
 开发模式下必须避免 SDK 被依赖预打包：实测未排除时，Worker 请求错误地指向 `node_modules/.vite/deps/assets/...` 并加载失败。排除后，Vite 可从包的真实目录提供资源；生产构建会输出独立 Worker/WASM。更新已有配置后应重启开发服务器，可使用 `vite --force` 刷新旧缓存。
+
+`assetsInlineLimit` 让 SDK 资源保持为独立文件，避免 PDF classic Worker 被内联为失去同源上下文的 data URL；其他应用资源沿用默认内联阈值。
 
 官方 `@vitejs/plugin-vue2` 仅支持 Vue 2.7；Vue 2.6、其他插件及 Vite 版本不在本次实测范围。
 

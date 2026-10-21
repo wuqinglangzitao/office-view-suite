@@ -2,6 +2,8 @@
 
 SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM，在浏览器内解析文件，不使用 iframe，也不上传文件内容。`apps/*` 是使用同一 SDK 的演示应用。
 
+业务项目首次接入可先阅读 [0.1.2 使用文档](usage.md)，其中包含文件加载、缩放工具栏、剩余高度布局、Vue 2 和原文件下载示例。本文补充源码构建、安装包校验和部署契约。
+
 ## 构建与安装
 
 SDK 的 ESM 包通过前端私服分发，公共入口会自动安装其余五个包：
@@ -145,7 +147,7 @@ Excel 只挂载当前工作表，往返切换保留各表滚动位置。大表�
 
 ## Worker 和 WASM 部署
 
-默认由相对于包的 URL 加载资源。Vite 构建会识别并输出这些资源，支持应用部署在 `/office-view/` 等子路径下，不要求站点根目录存在 `/pdfium` 或 `/glue`。
+默认由相对于包的 URL 加载资源。Vite 构建会识别并输出这些资源，支持应用部署在 `/office-view/` 等子路径下，不要求站点根目录存在 `/pdfium` 或 `/glue`。生产构建应让 SDK 资源保持为独立文件，避免 PDF classic Worker 被内联为 data URL；配置示例见 [使用文档](usage.md#vite-配置)。
 
 Vite 开发服务器应将六个 SDK 包加入 `optimizeDeps.exclude`，以免预打包移动 `import.meta.url` 后丢失相邻 Worker/WASM。独立安装包实测复现了此问题；完整配置见 [Vue 2 + Vite](vue2.md#安装与-vite-配置)。
 

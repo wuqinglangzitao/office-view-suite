@@ -8,7 +8,7 @@ SDK 当前版本为 **0.1.2**，ESM 包通过公司前端私服分发，也支�
 
 项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。源码入口：[公司 GitLab](http://git.dev.e6gpshk.com/202009271967/office-view-suite) · [GitHub](https://github.com/wuqinglangzitao/office-view-suite)。
 
-[SDK 接入](#sdk-接入) · [Vue 2 + Vite](docs/vue2.md) · [缩放与容器布局](#缩放与容器布局) · [源码开发](#源码开发) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
+[使用文档](docs/usage.md) · [SDK 接入](#sdk-接入) · [Vue 2 + Vite](docs/vue2.md) · [缩放与容器布局](#缩放与容器布局) · [源码开发](#源码开发) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
 
 ## 支持格式
 
@@ -57,11 +57,17 @@ export default defineConfig({
       '@office-view-suite/viewer-pdf',
     ],
   },
-  build: { target: 'es2022' },
+  build: {
+    target: 'es2022',
+    assetsInlineLimit(filePath) {
+      if (filePath.includes('/node_modules/@office-view-suite/')) return false;
+      return undefined;
+    },
+  },
 });
 ```
 
-开发模式排除依赖预打包，确保 Worker/WASM 保持正确的相对路径；生产构建由 Vite 输出这些资源。修改配置后重启开发服务器，必要时使用 `vite --force` 刷新旧缓存。Vue 2.7 的完整配置与可复制组件见 [Vue 2 + Vite 接入](docs/vue2.md)。
+开发模式排除依赖预打包，确保 Worker/WASM 保持正确的相对路径；生产构建保持 SDK 资源为独立文件，避免 PDF Worker 被内联为 data URL。修改配置后重启开发服务器，必要时使用 `vite --force` 刷新旧缓存。Vue 2.7 的完整配置与可复制组件见 [Vue 2 + Vite 接入](docs/vue2.md)。
 
 ### 最小用法
 
