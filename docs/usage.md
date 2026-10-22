@@ -381,6 +381,8 @@ export default {
 
 仓库配套组件还提供 `ready/statechange/warning/error` 事件和 `assetsBaseUrl` 属性，完整说明见 [Vue 2 使用组件](vue2.md#使用组件)。它是可复制的业务封装，公共包入口仍为 `createOfficeViewer()`。
 
+Vue 2 水印通过 `:watermark="watermark"` 和 `@watermark-error="onWatermarkError"` 接入；设为完整配置对象开启/更新，设为 `null` 关闭。完整 Options API 示例及可运行的配置面板见 [Vue 2 水印配置](vue2.md#文字水印源码-020)，包含身份信息更新、全部样式参数及等待提交的命令式用法。
+
 动态创建 Vue 根实例的弹窗若使用 `$t()`，应继承应用上下文或显式注入应用使用的 `i18n` 实例。今天出现的 `Cannot read properties of undefined (reading '_t')` 与动态根实例缺少国际化上下文有关；文件解析 SDK 无需配置 vue-i18n。
 
 ### 附件弹窗完整代码

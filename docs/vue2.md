@@ -95,14 +95,96 @@ export default {
 
 ## 文字水印（源码 0.2.0）
 
+运行示例中的“水印配置（主预览）”可编辑多行内容、字号、字体、角度、透明度、颜色及水平/垂直间距，点击“应用 / 更新水印”生效，点击“关闭水印”移除。默认关闭；可以先配置再选择文件，也可以在阅读时更新。
+
+下面是可复制的 Options API 示例，初始水印在打开文件前配置；修改姓名或部门后点击“应用 / 更新水印”，即可替换身份信息：
+
 ```vue
-<OfficePreview ref="preview" :source="source" :watermark="watermark"
-  @watermark-error="onWatermarkError" />
+<template>
+  <div>
+    <input type="file" accept=".doc,.docx,.docm,.xlsx,.xlsm,.pptx,.pdf" @change="selectFile" />
+    <label>姓名 <input v-model="userName" /></label>
+    <label>部门 <input v-model="department" /></label>
+    <button @click="updateWatermark">应用 / 更新水印</button>
+    <button @click="disableWatermark">关闭水印</button>
+    <div style="height: 75vh; min-width: 0">
+      <OfficePreview
+        ref="preview"
+        :source="source"
+        :watermark="watermark"
+        @error="onError"
+        @watermark-error="onWatermarkError"
+      />
+    </div>
+  </div>
+</template>
+
+<script>
+import OfficePreview from './OfficePreview.vue';
+
+function createWatermark(userName, department) {
+  return {
+    content: [
+      `内部资料 · ${userName}`,
+      `${department} · ${new Date().toLocaleDateString('zh-CN')}`,
+    ],
+    rotate: -25,
+    opacity: 0.12,
+    fontSize: 14,
+    fontFamily: 'sans-serif',
+    color: '#000000',
+    gap: [120, 80],
+  };
+}
+
+export default {
+  components: { OfficePreview },
+  data() {
+    return {
+      source: null,
+      userName: '张三（00123）',
+      department: '运输部',
+      watermark: createWatermark('张三（00123）', '运输部'),
+    };
+  },
+  methods: {
+    selectFile(event) {
+      const file = event.target.files[0];
+      this.source = file ? { bytes: file, name: file.name } : null;
+    },
+    updateWatermark() {
+      // 替换整个对象；仅修改 this.watermark.content 不会触发更新。
+      this.watermark = createWatermark(this.userName, this.department);
+    },
+    disableWatermark() {
+      this.watermark = null;
+    },
+    onError(error) { console.error(error.code, error.message); },
+    onWatermarkError(error) { console.warn('水印配置或绘制失败', error.code, error.message); },
+  },
+};
+</script>
 ```
 
-将 `watermark` 设为 `{ content: ['内部资料 · 张三', '运输部'] }` 开启，设为 `null` 关闭。替换整个对象触发更新，不使用深度监听；只更新水印不重新打开文件。source 和水印同轮替换时，组件先清空、等待新水印成功，再展示新文件，避免使用上一用户的水印。也可 `await this.$refs.preview.setWatermark(config)`，通过 `getWatermark()` 读取实际配置。
+`content` 支持字符串或字符串数组，换行后最多 4 行；`opacity` 范围为 0–1，设为 0 只是透明，关闭请用 `null`。`gap` 顺序为水平、垂直间距（CSS px）。参数范围与 CSP 要求见[文字水印](usage.md#文字水印020)。示例中的身份信息请替换为业务登录用户数据。
 
-`watermark-error` 独立于预览错误，不禁用已有文档的缩放或下载。附件服务 `openAttachmentPreview({ ..., watermark })` 返回的包装实例同样提供异步 setter/getter，setter 等待真实提交；关闭时取消待处理更新。参数与 CSP 要求见[文字水印](usage.md#文字水印020)。已发布的 `0.1.2` 不含这些接口，请使用源码打包的 `0.2.0`。
+组件不使用深度监听，更新时必须替换整个 `watermark` 对象；SDK 按完整配置替换，省略的样式恢复默认值。只更新水印不重新打开文件，也不重置缩放或滚动位置。source 和水印同轮替换时，组件先清空、等待新水印成功，再展示新文件。
+
+需要等待提交完成时，可在组件挂载后使用命令式接口；该方式与 prop 绑定任选一种作为配置来源，避免两套状态相互覆盖：
+
+```js
+try {
+  await this.$refs.preview.setWatermark({ content: ['内部资料 · 李四', '运输部'], opacity: 0.18 });
+  console.log(this.$refs.preview.getWatermark()); // 已成功应用的完整配置
+  await this.$refs.preview.setWatermark(null);   // 关闭
+} catch (error) {
+  console.warn(error.code, error.message);
+}
+```
+
+prop 更新需要等待 Vue watcher 和异步绘制完成；`$nextTick()` 本身不表示水印已应用。`getWatermark()` 返回成功应用的快照；命令式 setter 不会反向修改父组件的 prop。
+
+`watermark-error` 独立于预览错误；运行时水印更新失败会保留旧水印，不禁用已有文档的缩放或下载。附件服务 `openAttachmentPreview({ ..., watermark })` 返回的包装实例同样提供异步 setter/getter，setter 等待真实提交；关闭时取消待处理更新。水印仅影响预览，下载仍为原文件。已发布的 `0.1.2` 不含这些接口，请使用源码打包的 `0.2.0`。
 
 ## 重复验证
 

@@ -11,6 +11,29 @@
       <button id="fit" :disabled="!previewMounted" @click="$refs.preview.setZoom('fit-width')">适应宽度</button>
       <button id="second" @click="toggleSecond">第二实例</button>
     </nav>
+    <form class="watermark-controls" @submit.prevent="applyWatermark">
+      <fieldset>
+        <legend>水印配置（主预览）</legend>
+        <label class="watermark-content">
+          内容（1–4 行）
+          <textarea id="watermark-content" v-model="watermarkDraft.content" rows="2" required></textarea>
+        </label>
+        <div class="watermark-fields">
+          <label>字号（px）<input id="watermark-font-size" v-model.number="watermarkDraft.fontSize" type="number" min="8" max="72" required /></label>
+          <label>字体<input id="watermark-font-family" v-model="watermarkDraft.fontFamily" required /></label>
+          <label>角度（°）<input id="watermark-rotate" v-model.number="watermarkDraft.rotate" type="number" min="-180" max="180" required /></label>
+          <label>透明度<input id="watermark-opacity" v-model.number="watermarkDraft.opacity" type="number" min="0" max="1" step="0.01" required /></label>
+          <label>颜色<input id="watermark-color" v-model="watermarkDraft.color" type="color" /></label>
+          <label>水平间距（px）<input id="watermark-gap-x" v-model.number="watermarkDraft.gapX" type="number" min="0" max="512" required /></label>
+          <label>垂直间距（px）<input id="watermark-gap-y" v-model.number="watermarkDraft.gapY" type="number" min="0" max="512" required /></label>
+        </div>
+        <div class="watermark-actions">
+          <button id="apply-watermark" type="submit">应用 / 更新水印</button>
+          <button id="disable-watermark" type="button" :disabled="!watermark" @click="disableWatermark">关闭水印</button>
+        </div>
+        <p>默认关闭。应用时替换完整配置对象，不重新打开文件；仅影响预览，下载仍为原文件。</p>
+      </fieldset>
+    </form>
     <output id="status" aria-live="polite">{{ status }}</output>
     <div class="viewers">
       <section v-show="visible" id="primary" class="preview-panel">
@@ -53,6 +76,16 @@ export default {
       kinds: Object.keys(samples),
       source: null,
       watermark: null,
+      watermarkDraft: {
+        content: '内部资料 · 张三（00123）\n运输部 · 2026-10-22',
+        fontSize: 14,
+        fontFamily: 'sans-serif',
+        rotate: -25,
+        opacity: 0.12,
+        color: '#000000',
+        gapX: 120,
+        gapY: 80,
+      },
       watermarkErrors: [],
       secondSource: null,
       secondResult: null,
@@ -70,6 +103,24 @@ export default {
 
   methods: {
     sample,
+
+    applyWatermark() {
+      const draft = this.watermarkDraft;
+      // Replace the prop object so the component's watcher applies this update.
+      this.watermark = {
+        content: draft.content,
+        fontSize: draft.fontSize,
+        fontFamily: draft.fontFamily,
+        rotate: draft.rotate,
+        opacity: draft.opacity,
+        color: draft.color,
+        gap: [draft.gapX, draft.gapY],
+      };
+    },
+
+    disableWatermark() {
+      this.watermark = null;
+    },
 
     async selectSample(kind) {
       const selection = this._selection = (this._selection || 0) + 1;
@@ -130,6 +181,14 @@ export default {
 body { margin: 24px; background: #f5f5f5; font: 14px system-ui; }
 nav { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0; }
 output { display: block; margin-bottom: 16px; }
+.watermark-controls { margin-bottom: 16px; }
+.watermark-controls fieldset { margin: 0; padding: 12px; border: 1px solid #ccc; }
+.watermark-controls label { display: flex; flex-direction: column; gap: 4px; }
+.watermark-content textarea { box-sizing: border-box; width: 100%; resize: vertical; font: inherit; }
+.watermark-fields { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; }
+.watermark-fields input { box-sizing: border-box; width: 132px; height: 30px; }
+.watermark-actions { display: flex; gap: 8px; margin-top: 12px; }
+.watermark-controls p { margin: 8px 0 0; color: #555; }
 .viewers { display: flex; gap: 20px; }
 .preview-panel { flex: 1; min-width: 0; height: 680px; }
 </style>
