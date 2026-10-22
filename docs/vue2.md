@@ -93,6 +93,17 @@ export default {
 
 固定资源目录时，将四个渲染包的 `dist/assets/` 内容合并到 `public/office-assets/`，保留内部路径；组件传入 `:assets-base-url="assetsBaseUrl"`，其值为 `${import.meta.env.BASE_URL}office-assets/`。许可材料需一并部署，见 [许可分发](sdk.md#第三方许可随包部署)。
 
+## 文字水印（源码 0.2.0）
+
+```vue
+<OfficePreview ref="preview" :source="source" :watermark="watermark"
+  @watermark-error="onWatermarkError" />
+```
+
+将 `watermark` 设为 `{ content: ['内部资料 · 张三', '运输部'] }` 开启，设为 `null` 关闭。替换整个对象触发更新，不使用深度监听；只更新水印不重新打开文件。source 和水印同轮替换时，组件先清空、等待新水印成功，再展示新文件，避免使用上一用户的水印。也可 `await this.$refs.preview.setWatermark(config)`，通过 `getWatermark()` 读取实际配置。
+
+`watermark-error` 独立于预览错误，不禁用已有文档的缩放或下载。附件服务 `openAttachmentPreview({ ..., watermark })` 返回的包装实例同样提供异步 setter/getter，setter 等待真实提交；关闭时取消待处理更新。参数与 CSP 要求见[文字水印](usage.md#文字水印020)。已发布的 `0.1.2` 不含这些接口，请使用源码打包的 `0.2.0`。
+
 ## 重复验证
 
 ```sh
@@ -101,6 +112,8 @@ pnpm test:packages
 PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:vue2
 ```
 
-测试复用已安装的 Playwright 和 Chrome。首次安装隔离消费者时可能联网获取 Vue/Vite 工具依赖。每次建立新的临时项目，从 tarball 安装 SDK，检查开发/生产 × 默认/固定资源目录四种组合，共 44 项检查：四格式实际渲染、File 上传、缩放、隐藏后显示、加载中替换、清空、错误去重与恢复、加载中卸载及重新挂载、双实例和 Worker 释放。
+测试复用已安装的 Playwright 和 Chrome。首次安装隔离消费者时可能联网获取 Vue/Vite 工具依赖。每次建立新的临时项目，从 tarball 安装 SDK，检查开发/生产 × 默认/固定资源目录四种组合，共 56 项检查：四格式实际渲染、File 上传、缩放、隐藏后显示、加载中替换、清空、错误去重与恢复、水印动态更新与身份切换、加载中卸载及重新挂载、双实例和 Worker 释放。
+
+`pnpm test:attachment` 另建临时消费者安装 Element UI 2.15.3，执行开发/生产两套共 8 项附件服务检查。组件库仅用于验证消费者，不加入 SDK 运行时依赖。水印几何与 Canvas/CSP 验证可执行 `pnpm test:watermark:layout` 和 `pnpm test:watermark`；这些浏览器命令均使用同一 `PLAYWRIGHT_MODULE` 设置。
 
 结果与四种格式截图位于 `output/playwright/vue2/`，临时消费者路径记录于 `output/vue2-consumer.json`。这是框架接入验证，不表示与 Office 原软件像素级一致；未验证的旧 Vue 版本及其他浏览器仍需另测。

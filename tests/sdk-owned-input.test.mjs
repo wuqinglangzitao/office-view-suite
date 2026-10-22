@@ -12,6 +12,11 @@ const coreUrl = asModule(compile(await readFile(new URL('../packages/viewer-core
 const core = await import(coreUrl);
 let facade = compile(await readFile(new URL('../packages/viewer/src/index.ts', import.meta.url), 'utf8'))
   .replaceAll("'@office-view-suite/viewer-core'", JSON.stringify(coreUrl));
+for (const module of ['watermark', 'watermark-layout']) {
+  const source = compile(await readFile(new URL(`../packages/viewer/src/${module}.ts`, import.meta.url), 'utf8'))
+    .replaceAll("'@office-view-suite/viewer-core'", JSON.stringify(coreUrl));
+  facade = facade.replaceAll(`'./${module}'`, JSON.stringify(asModule(source)));
+}
 for (const kind of ['word', 'excel', 'ppt', 'pdf']) {
   const name = kind[0].toUpperCase() + kind.slice(1);
   facade = facade.replaceAll(`'@office-view-suite/viewer-${kind}'`, JSON.stringify(asModule(

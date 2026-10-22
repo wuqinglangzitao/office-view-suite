@@ -163,6 +163,71 @@ async function verify(base, mode, assetMode) {
     assert.equal(await page.evaluate(() => window.vue2Fixture.app.errors.length), 1, 'One error must not emit twice');
     suite.results.push({ test: 'error-deduplication-and-recovery' });
 
+    const watermarkBefore = await page.evaluate(() => {
+      const app = window.vue2Fixture.app;
+      const preview = app.$refs.preview;
+      preview.setZoom(1.5);
+      preview.$refs.container.scrollTop = 80;
+      preview.$refs.container.scrollLeft = 20;
+      return {
+        workers: window.workerAudit.created, ready: app.ready.length,
+        scrollTop: preview.$refs.container.scrollTop,
+        scrollLeft: preview.$refs.container.scrollLeft,
+        scale: preview._viewer.getZoom().scale,
+      };
+    });
+    await page.evaluate(() => { window.vue2Fixture.app.watermark = { content: ['内部资料 · Vue 2', '运输部'], opacity: 0.25 }; });
+    await page.waitForFunction(() => window.vue2Fixture.app.$refs.preview.getWatermark()?.content[0] === '内部资料 · Vue 2');
+    await page.evaluate(() => { window.vue2Fixture.app.watermark = { content: '替换用户' }; });
+    await page.waitForFunction(() => window.vue2Fixture.app.$refs.preview.getWatermark()?.content[0] === '替换用户');
+    assert.deepEqual(await page.evaluate(() => {
+      const app = window.vue2Fixture.app;
+      const preview = app.$refs.preview;
+      return {
+        workers: window.workerAudit.created, ready: app.ready.length,
+        scrollTop: preview.$refs.container.scrollTop,
+        scrollLeft: preview.$refs.container.scrollLeft,
+        scale: preview._viewer.getZoom().scale,
+      };
+    }), watermarkBefore, 'Watermark prop updates must preserve worker, source, zoom and scroll');
+    await page.evaluate(() => { window.vue2Fixture.app.watermark = { content: '' }; });
+    await page.waitForFunction(() => window.vue2Fixture.app.watermarkErrors.length === 1);
+    assert.equal(await page.evaluate(() => window.vue2Fixture.app.errors.length), 1, 'Runtime watermark errors must not enter the preview error path');
+    assert.equal(await page.evaluate(() => window.vue2Fixture.app.$refs.preview.getWatermark().content[0]), '替换用户');
+    await rendered('pdf');
+    suite.results.push({ test: 'watermark-prop-update-without-reopen-or-zoom-scroll-reset' });
+
+    await page.evaluate(async () => {
+      const app = window.vue2Fixture.app;
+      const ppt = await app.sample('ppt');
+      app.source = ppt;
+      app.watermark = { content: ' ' };
+    });
+    await page.waitForFunction(() => window.vue2Fixture.app.errors.length === 2);
+    assert.equal(await page.locator('#primary .office-viewer-surface').evaluate(surface => surface.shadowRoot.childNodes.length), 0,
+      'A new attachment with an invalid identity must remain blank');
+    assert.equal(await page.evaluate(() => window.vue2Fixture.app.ready.length), count);
+    await page.evaluate(() => { window.vue2Fixture.app.watermark = { content: '恢复后的用户' }; });
+    await ready('pptx', ++count);
+    await rendered('ppt');
+    assert.equal(await page.evaluate(() => window.vue2Fixture.app.$refs.preview.getWatermark().content[0]), '恢复后的用户');
+    suite.results.push({ test: 'source-and-watermark-same-tick-failure-and-recovery' });
+
+    const rapid = await page.evaluate(async () => {
+      const preview = window.vue2Fixture.app.$refs.preview;
+      const first = preview.setWatermark({ content: '被替代用户' }).then(() => 'BAD', error => error.code);
+      const second = preview.setWatermark({ content: '最终用户' });
+      await second;
+      return { code: await first, content: preview.getWatermark().content[0] };
+    });
+    assert.deepEqual(rapid, { code: 'ABORTED', content: '最终用户' });
+    if (mode === 'production' && assetMode === 'bundled') {
+      await page.screenshot({ path: resolve(output, 'watermark-ppt.png') });
+    }
+    await page.evaluate(() => { window.vue2Fixture.app.watermark = null; });
+    await page.waitForFunction(() => !document.querySelector('#primary .office-viewer-watermark'));
+    suite.results.push({ test: 'watermark-rapid-replacement-and-disable' });
+
     await page.evaluate(async () => {
       const app = window.vue2Fixture.app;
       const word = await app.sample('word');
@@ -173,10 +238,20 @@ async function verify(base, mode, assetMode) {
       app.source = { bytes: new SlowBlob([word.bytes]), name: word.name };
       await app.$nextTick();
       if (!window.releaseVue2Read) throw new Error('Pending Blob did not start before unmount');
+      window.originalVueWatermarkDecode = HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode = function () {
+        return window.originalVueWatermarkDecode.call(this).then(() => new Promise(resolve => { window.releaseVueWatermarkDecode = resolve; }));
+      };
+      window.pendingVueWatermark = app.$refs.preview.setWatermark({ content: '销毁前等待中的用户' })
+        .then(() => 'BAD', error => error.code);
     });
+    await page.waitForFunction(() => typeof window.releaseVueWatermarkDecode === 'function');
     await page.locator('#mount').click();
     await page.waitForFunction(() => window.workerAudit.active === 0 && !document.querySelector('#primary .office-preview'));
     const code = await page.evaluate(async () => {
+      HTMLImageElement.prototype.decode = window.originalVueWatermarkDecode;
+      window.releaseVueWatermarkDecode();
+      if (await window.pendingVueWatermark !== 'DESTROYED') throw new Error('Unmount did not cancel the pending watermark');
       window.releaseVue2Read();
       const app = window.vue2Fixture.app;
       const source = await app.sample('ppt');
@@ -189,7 +264,7 @@ async function verify(base, mode, assetMode) {
     await page.locator('#mount').click();
     await ready('pptx', ++count);
     await rendered('ppt');
-    suite.results.push({ test: 'beforeDestroy-during-load-and-remount', code });
+    suite.results.push({ test: 'beforeDestroy-during-load-watermark-and-remount', code });
 
     await page.locator('#second').click();
     await page.waitForFunction(() => window.vue2Fixture.app.secondResult?.format === 'pdf'
@@ -202,7 +277,7 @@ async function verify(base, mode, assetMode) {
     const audit = await page.evaluate(() => ({ ...window.workerAudit }));
     assert.equal(audit.created, audit.terminated);
     suite.results.push({ test: 'independent-instances-and-worker-cleanup', ...audit });
-    assert.deepEqual(await page.evaluate(() => window.vue2Fixture.app.errors.map(error => error.code)), ['UNSUPPORTED_FORMAT']);
+    assert.deepEqual(await page.evaluate(() => window.vue2Fixture.app.errors.map(error => error.code)), ['UNSUPPORTED_FORMAT', 'INVALID_WATERMARK']);
     assert.deepEqual(suite.errors, [], 'Unhandled browser or console errors');
     assert.deepEqual(suite.failures, [], 'Failed resource requests');
     assert.deepEqual(suite.httpErrors, [], 'HTTP resource errors');

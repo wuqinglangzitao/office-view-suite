@@ -13,6 +13,8 @@ import {
   type OfficeViewerState,
   type OfficeZoom,
 } from '@office-view-suite/viewer-core';
+import { createWatermarkController, validateWatermark } from './watermark';
+import { createWatermarkLayout } from './watermark-layout';
 
 type Rendered = { stats: Record<string, number>; dispose(): void; resize?(): void; getContentWidth?(): number; setZoom?(scale: number): void };
 type RuntimeAdapter = {
@@ -56,6 +58,8 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 export function createOfficeViewer(container: HTMLElement, options: OfficeViewerOptions = {}): OfficeViewer {
+  // Reject invalid configuration before changing any caller-owned DOM.
+  const initialWatermark = options.watermark == null ? null : validateWatermark(container.ownerDocument, options.watermark);
   // The caller owns its container, existing children, style, and possible shadow root.
   const viewport = container.ownerDocument.createElement('div');
   viewport.className = 'office-viewer-host';
@@ -150,7 +154,15 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
     }
   };
 
+  const watermarkLayout = createWatermarkLayout(viewport, host, content);
+  const watermark = createWatermarkController(container.ownerDocument, initialWatermark, {
+    commit(tile) { if (currentRendered) watermarkLayout.show(tile); },
+    hide() { watermarkLayout.hide(); },
+    error(operation, error) { emit({ type: 'watermarkerror', operation, error }); },
+  });
+
   const clearRendered = (): void => {
+    watermarkLayout.hide();
     renderGeneration++;
     const rendered = currentRendered;
     const adapter = currentAdapter;
@@ -201,6 +213,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       if (customZoom || currentRendered.setZoom) currentRendered.resize?.();
       lastWidth = container.getBoundingClientRect().width;
       lastHeight = container.clientHeight;
+      watermark.mount();
     } catch (error) {
       throw asViewerError(error, 'RENDER_FAILED');
     }
@@ -214,6 +227,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       else renderCurrent();
       lastWidth = container.getBoundingClientRect().width;
       lastHeight = container.clientHeight;
+      watermarkLayout.request();
     } catch (error) {
       emit({ type: 'statechange', state: 'error' });
       emit({ type: 'error', error: asViewerError(error, 'RENDER_FAILED') });
@@ -262,6 +276,11 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
         const adapter = await untilAborted(getAdapter(format), session.signal);
         if (session.signal.aborted) throw abortError(session.signal);
         const result = await untilAborted(adapter.open(prepared), session.signal);
+        // A replacement watermark can supersede a task while this open is waiting.
+        // Check again on this continuation before synchronously mounting the document.
+        do {
+          await untilAborted(watermark.wait(), session.signal);
+        } while (watermark.hasPending());
         if (session.signal.aborted) throw abortError(session.signal);
         if (destroyed) throw createOfficeViewerError('DESTROYED', 'viewer 已销毁');
         currentAdapter = adapter;
@@ -299,6 +318,7 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
       if (destroyed) return;
       activeSession?.abort();
       activeSession = undefined;
+      watermark.clear();
       clearRendered();
       emit({ type: 'statechange', state: 'idle' });
     },
@@ -315,11 +335,15 @@ export function createOfficeViewer(container: HTMLElement, options: OfficeViewer
     },
     getZoom() { return { mode: zoom === 'fit-width' ? 'fit-width' : 'fixed', scale }; },
     getCapabilities() { return { zoom: !destroyed, fitWidth: !destroyed }; },
+    setWatermark: watermark.set,
+    getWatermark: watermark.get,
     destroy(): void {
       if (destroyed) return;
       destroyed = true;
       activeSession?.abort(createOfficeViewerError('DESTROYED', 'viewer 已销毁'));
       activeSession = undefined;
+      watermark.destroy();
+      watermarkLayout.destroy();
       clearRendered();
       resizeObserver?.disconnect();
       if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
@@ -353,4 +377,6 @@ export type {
   OfficeZoom,
   OfficeZoomState,
   OfficeViewerCapabilities,
+  OfficeWatermarkOptions,
+  OfficeWatermarkConfig,
 } from '@office-view-suite/viewer-core';

@@ -25,6 +25,7 @@
       </div>
       <p v-if="loading" class="ovs-attachment-dialog__message" role="status">正在加载文档…</p>
       <p v-if="errorMessage" class="ovs-attachment-dialog__error" role="alert">{{ errorMessage }}</p>
+      <p v-if="watermarkError" class="ovs-attachment-dialog__error" role="alert">{{ watermarkError }}</p>
       <p v-if="downloadError" class="ovs-attachment-dialog__error" role="alert">{{ downloadError }}</p>
       <div ref="officeHost" class="ovs-attachment-dialog__host" :aria-busy="loading"></div>
     </div>
@@ -50,12 +51,14 @@ export default {
     assetsBaseUrl: { type: String, default: '' },
     fetchFile: { type: Function, default: fetchAttachment },
     downloadHandler: { type: Function, default: null },
+    watermark: { type: Object, default: null },
   },
   data() {
     return {
       loading: false,
       errorMessage: '',
       downloadError: '',
+      watermarkError: '',
       downloading: false,
       zoomScale: null,
     };
@@ -73,6 +76,10 @@ export default {
     fileName() { this.queuePreview(); },
     assetsBaseUrl() { this.queuePreview(); },
     fetchFile() { this.queuePreview(); },
+    watermark(value) {
+      // A service call sets the intent before updating its prop; avoid applying twice.
+      if (value !== this._watermarkInput) void this.setWatermark(value).catch(() => {});
+    },
   },
   created() {
     // SDK、AbortController 不放入 data，避免 Vue 2 深度观察它们。
@@ -80,6 +87,12 @@ export default {
     this._downloadController = null;
     this._requestId = 0;
     this._disposed = false;
+    this._watermarkVersion = 0;
+    this._watermarkInput = this.watermark;
+    this._desiredWatermark = this.watermark;
+    this._watermarkRequest = null;
+    this._lastWatermarkPromise = null;
+    this._reportedWatermarkErrors = new WeakSet();
   },
   mounted() {
     this._resizeObserver = new ResizeObserver(() => {
@@ -96,7 +109,9 @@ export default {
   },
   methods: {
     async queuePreview() {
-      this.cleanup();
+      // Source watchers coalesce through nextTick. Keep a lazy setter waiting
+      // for the new session, rather than applying it to an outgoing document.
+      this.cleanup(true);
       if (this._disposed || !this.visible || !this.fileUrl) return;
       const requestId = this._requestId;
       this.loading = true;
@@ -108,22 +123,39 @@ export default {
       this._resizeObserver.disconnect();
       this._resizeObserver.observe(host);
       try {
+        const watermarkVersion = this._watermarkVersion;
         const session = createPreviewSession(host, {
           fileUrl: this.fileUrl,
           fileName: getFileName(this.fileName, this.fileUrl),
           assetsBaseUrl: this.assetsBaseUrl,
           fetchFile: this.fetchFile,
+          watermark: this._desiredWatermark,
           onError: error => {
             if (requestId === this._requestId) this.reportError(error);
           },
+          onWatermarkError: error => {
+            if (requestId === this._requestId) this.reportWatermarkError(error);
+          },
         });
         this._previewSession = session;
+        void session.watermarkReady.then(() => {
+          if (requestId === this._requestId && watermarkVersion === this._watermarkVersion) this.completeWatermark();
+        }, error => {
+          if (requestId === this._requestId && watermarkVersion === this._watermarkVersion) {
+            this.failWatermark(error);
+            this.reportWatermarkError(error);
+          }
+        });
         const result = await session.ready;
         if (requestId !== this._requestId) return;
         this.syncZoom();
         this.$emit('ready', result);
       } catch (error) {
-        if (requestId === this._requestId) this.reportError(error);
+        if (requestId === this._requestId) {
+          if (!this._previewSession) this.failWatermark(error);
+          if (['INVALID_WATERMARK', 'WATERMARK_FAILED'].includes(error.code)) this.reportWatermarkError(error);
+          this.reportError(error);
+        }
       } finally {
         if (requestId === this._requestId) this.loading = false;
       }
@@ -139,7 +171,7 @@ export default {
         this.$emit('closed');
       }
     },
-    cleanup() {
+    cleanup(preserveWatermarkRequest = false) {
       this._requestId += 1;
       this._previewSession?.remove();
       this._previewSession = null;
@@ -151,6 +183,79 @@ export default {
       this.zoomScale = null;
       this.errorMessage = '';
       this.downloadError = '';
+      this.watermarkError = '';
+      if (!preserveWatermarkRequest) {
+        this._watermarkVersion += 1;
+        this.failWatermark(Object.assign(new Error(this._disposed ? '附件预览已销毁' : '附件预览已关闭'), {
+          code: this._disposed ? 'DESTROYED' : 'ABORTED',
+        }));
+        this._lastWatermarkPromise = null;
+      }
+    },
+    setWatermark(value) {
+      if (this._disposed || !this.visible) {
+        return Promise.reject(Object.assign(new Error('附件预览未打开'), { code: this._disposed ? 'DESTROYED' : 'ABORTED' }));
+      }
+      if (value === this._watermarkInput && this._lastWatermarkPromise) return this._lastWatermarkPromise;
+      this._watermarkVersion += 1;
+      const version = this._watermarkVersion;
+      this.failWatermark(Object.assign(new Error('水印更新已被替代'), { code: 'ABORTED' }));
+      this._watermarkInput = value;
+      this._desiredWatermark = value;
+      this.watermarkError = '';
+      const promise = new Promise((resolve, reject) => {
+        this._watermarkRequest = { version, resolve, reject };
+      });
+      this._lastWatermarkPromise = promise;
+      // Attach a rejection handler even when a prop watcher owns the request.
+      void promise.catch(() => {});
+      const session = this._previewSession;
+      if (session) {
+        void session.setWatermark(value).then(() => {
+          if (session === this._previewSession && version === this._watermarkVersion) this.completeWatermark();
+        }, error => {
+          // A source replacement will apply the pending intent on its new session.
+          if (session !== this._previewSession || version !== this._watermarkVersion) return;
+          this.failWatermark(error);
+          this.reportWatermarkError(error);
+        });
+      }
+      // No session yet: queuePreview/handleOpened uses the latest intent in its
+      // constructor. The promise completes when its watermark barrier commits.
+      return promise;
+    },
+    getWatermark() { return this._previewSession?.getWatermark() ?? null; },
+    // Service-owned state can roll back after failure; ordinary props are never mutated.
+    syncWatermarkIntent(value) {
+      this._watermarkInput = value;
+      this._desiredWatermark = value;
+      this._lastWatermarkPromise = null;
+      // Invalid updates do not cancel an earlier valid SDK task. Restore the
+      // service-owned intent explicitly so an older pending user cannot commit
+      // after the service has rolled back its state to the applied snapshot.
+      const session = this._previewSession;
+      if (session) {
+        void session.setWatermark(value).catch(error => {
+          if (session === this._previewSession) this.reportWatermarkError(error);
+        });
+      }
+    },
+    completeWatermark() {
+      const request = this._watermarkRequest;
+      this._watermarkRequest = null;
+      this.watermarkError = '';
+      request?.resolve();
+    },
+    failWatermark(error) {
+      const request = this._watermarkRequest;
+      this._watermarkRequest = null;
+      request?.reject(error);
+    },
+    reportWatermarkError(error) {
+      if (isCancelled(error) || this._reportedWatermarkErrors.has(error)) return;
+      this._reportedWatermarkErrors.add(error);
+      this.watermarkError = error?.message || '水印更新失败';
+      this.$emit('watermark-error', error);
     },
     reportError(error) {
       if (isCancelled(error)) return;

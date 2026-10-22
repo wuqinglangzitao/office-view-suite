@@ -4,11 +4,13 @@
 
 文件由 Worker 与 Rust/WASM 在浏览器内解析，SDK 不上传文档内容。通过原生 DOM、Shadow DOM 和 Canvas 渲染，无需 iframe；支持多实例、取消加载和组件卸载时释放资源。
 
-SDK 当前版本为 **0.1.2**，ESM 包通过公司前端私服分发，也支持从源码构建和离线安装。业务项目直接调用 SDK；文件选择、工具栏和下载交互由宿主应用提供。
+源码 SDK 版本为 **0.2.0**（新增文字水印，尚未发布）；已发布版本为 **0.1.2**。ESM 包通过公司前端私服分发，也支持从源码构建和离线安装。业务项目直接调用 SDK；文件选择、工具栏和下载交互由宿主应用提供。
 
 项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。源码入口：[公司 GitLab](http://git.dev.e6gpshk.com/202009271967/office-view-suite) · [GitHub](https://github.com/wuqinglangzitao/office-view-suite)。
 
 [使用文档](docs/usage.md) · [SDK 接入](#sdk-接入) · [Vue 2 + Vite](docs/vue2.md) · [缩放与容器布局](#缩放与容器布局) · [源码开发](#源码开发) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
+
+文字水印：源码 `0.2.0` 支持初始化、运行时替换/关闭、多行文字和样式配置，覆盖四类预览且不随文档缩放。[使用方式](docs/usage.md#文字水印020) · [设计与边界](docs/superpowers/specs/2026-10-22-office-viewer-watermark-design.md)。已发布 `0.1.2` 不含此 API。
 
 ## 支持格式
 
@@ -214,6 +216,9 @@ SDK 源码和引擎构建归属 `packages/`，构建不依赖演示应用目录�
 | `pnpm test:rust` | 运行 Word、Excel、PPT crate 的原生单元测试 |
 | `pnpm test:packages` | 打包、核对许可材料，在独立临时项目安装并构建 |
 | `pnpm test:vue2` | 独立安装包的 Vue 2 开发/生产浏览器验证（需先运行 test:packages） |
+| `pnpm test:watermark` | 四格式水印、原子更新、错误回退、字体/DPR 和 CSP 验证 |
+| `pnpm test:watermark:layout` | 有界/自动高度、缩放、滚动和隐藏恢复的覆盖层几何检查 |
+| `pnpm test:attachment` | Vue 2 + Element UI 附件弹窗的真实水印更新与销毁验证 |
 | `pnpm test:excel` | Excel 大表性能、工作表切换与布局回归（需要 Playwright） |
 | `pnpm test:word` | Word 段落、列表、分节与渐进分页回归（需要 Playwright） |
 | `pnpm test:word:tables` | Word 表格样式、合并单元格与跨页表头回归（需要 Playwright） |

@@ -1,6 +1,6 @@
 # Office View Suite 使用文档
 
-适用版本：`@office-view-suite/viewer@0.1.2`。整理日期：2026-10-21。
+适用版本：源码 `@office-view-suite/viewer@0.2.0`（尚未发布）；私服已发布 `0.1.2` 可使用原有接口，水印需本次源码打包产物。更新日期：2026-10-22。
 
 本文面向业务前端开发人员，介绍如何将文档预览嵌入页面、上传组件和附件弹窗。SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM 在浏览器内解析文件，PDF 使用 PDFium 渲染，无需 iframe；SDK 不上传文档内容。
 
@@ -247,6 +247,7 @@ SDK 自动取消的是已经进入 `open()` 的旧会话。宿主发出的 `fetc
 | `options.format` | 可选的格式提示，通常让 SDK 根据文件识别即可 |
 | `options.assets` | 可选的 Worker、WASM、PDFium 资源 URL 配置 |
 | `options.workerFactory` | 可选的自定义 Worker 创建函数，详见部署文档 |
+| `options.watermark` | 可选文字水印，默认 `null`；`0.2.0` 新增 |
 
 ### 实例方法
 
@@ -259,6 +260,8 @@ SDK 自动取消的是已经进入 `open()` 的旧会话。宿主发出的 `fetc
 | `setZoom('fit-width')` | 按容器宽度计算比例，仍受 10%–400% 范围约束 |
 | `getZoom()` | 返回 `{ mode: 'fixed' \| 'fit-width', scale: number }` |
 | `getCapabilities()` | 查询当前缩放和适应宽度能力 |
+| `setWatermark(options \| null)` | 图块就绪后原子替换，返回 `Promise<void>`；`null` 立即关闭 |
+| `getWatermark()` | 最后成功应用的归一化配置快照，关闭时为 `null` |
 | `on(listener)` | 订阅事件，返回取消订阅函数 |
 | `destroy()` | 取消任务、终止 Worker 并释放 DOM；可重复调用 |
 
@@ -273,6 +276,7 @@ SDK 自动取消的是已经进入 `open()` 的旧会话。宿主发出的 `fetc
 | `statechange` | `state` 为 `idle/loading/ready/error/destroyed`，可用于加载提示 |
 | `warning` | `code`、`message`，记录降级或未完整支持的文档特性 |
 | `error` | `error.code`、`error.message`；同时覆盖后台 PDF 绘制和 Excel 切表等错误 |
+| `watermarkerror` | `operation`、`error`；水印初始化、更新和后台刷新的独立错误 |
 
 | 错误码 | 常见原因 |
 | --- | --- |
@@ -281,8 +285,43 @@ SDK 自动取消的是已经进入 `open()` 的旧会话。宿主发出的 `fetc
 | `ASSET_LOAD_FAILED` | Worker、WASM、PDFium 或适配器资源加载失败 |
 | `PARSE_FAILED` | 解析器无法读取文件内容 |
 | `RENDER_FAILED` | DOM/Canvas 绘制失败，或 Excel 可见区域密度超过保护上限 |
+| `INVALID_WATERMARK` | 水印内容/样式非法，或图块超过位图预算 |
+| `WATERMARK_FAILED` | 水印绘制、编码/解码或 CSP 失败 |
 | `ABORTED` | 文件加载被取消、替换或清空 |
 | `DESTROYED` | 实例已销毁，需要新建实例后再打开 |
+
+## 文字水印（0.2.0）
+
+```ts
+const viewer = createOfficeViewer(container, {
+  watermark: { content: ['内部资料 · 张三（00123）', '运输部 · 2026-10-22'] },
+});
+viewer.on(event => {
+  if (event.type === 'watermarkerror') console.error(event.operation, event.error);
+});
+await viewer.open({ bytes: file, name: file.name });
+await viewer.setWatermark({ content: '内部资料 · 李四', color: '#666', rotate: -25 });
+console.log(viewer.getWatermark());
+await viewer.setWatermark(null);
+```
+
+| 参数 | 默认值与限制 |
+| --- | --- |
+| `content` | 必填，字符串或字符串数组；按换行展开，1–4 行、每行 ≤128 Unicode 码点，总计 ≤256；首尾空白行移除，行内空格保留 |
+| `rotate` | `-25`，有限数值 `-180…180` 度 |
+| `opacity` | `0.12`，`0…1`；`0` 仍保留配置 |
+| `fontSize` | `14`，`8…72` CSS px |
+| `fontFamily` | `sans-serif`，可用于 Canvas 的 CSS 字体列表，≤256 字符；不支持 URL、CSS 变量和全局关键字 |
+| `color` | `#000000`，仅 `#RGB` / `#RRGGBB` |
+| `gap` | `[120, 80]`，旋转文字包围盒间的水平/垂直空隙，各 `0…512` CSS px |
+
+更新为完整替换，省略字段恢复默认；SDK 复制入参，getter 返回独立快照。空内容报错，关闭使用 `null`。setter 校验失败通过 Promise 拒绝，构造参数非法则在改变 DOM 前同步抛错。初始图块准备期间 getter 为 `null`，`open()` 等待准备完成再挂载。
+
+水印覆盖 Word/PPT/PDF 页面及页间、Excel 工作簿及可点击的工作表标签；不覆盖外部标题和工具栏。字号和间距不随 SDK 缩放，不影响文本选择与滚动。运行时替换不重新下载/解析，也不重置缩放和阅读位置。`clear()` 保留成功配置，重开可复用；取消的更新返回 `ABORTED`，销毁后为 `DESTROYED`。
+
+更新或后台字体/DPR 刷新失败时保留旧水印及文档。初始水印失败会阻止打开，需成功重设或显式关闭；Promise 和事件可携带同一错误对象，按身份去重。图块 DPR 限制为 1–3，边长最多 4096、面积最多 4,194,304 像素，超限不截断或自动缩小。解码超时 5 秒；底层未结束前拒绝新的绘制请求，结束后可手动重试。
+
+CSP 的 `img-src` 需允许 `data:`。水印仅在浏览器生成，不上传身份信息；下载仍为原文件。首期不提供打印、带水印导出或防删除能力。
 
 ## 缩放、宽度与剩余高度
 
@@ -411,21 +450,25 @@ import { openAttachmentPreview } from './components/AttachmentPreview/service.js
 
 export default {
   methods: {
-    handlePreview(file) {
+    async handlePreview(file) {
       const dialog = openAttachmentPreview({
         parent: this,
         i18n: this.$i18n,
         fileUrl: file.url,
         fileName: file.name,
+        watermark: { content: ['内部资料 · 张三', '运输部'] },
       });
       dialog.$on('error', error => console.error(error));
       dialog.$on('download-error', error => console.error(error));
+      dialog.$on('watermark-error', error => console.error(error));
+      // 需要切换显示身份时，等待真实图块提交；不会重新加载附件。
+      await dialog.setWatermark({ content: '内部资料 · 李四' });
     },
   },
 };
 ```
 
-`fileUrl` 是可请求的附件地址，`fileName` 应携带原扩展名；无文件名时示例从 URL 路径推断。服务入口同一时间只保留一个弹窗，再次打开会销毁上一个；它返回 Vue 包装实例，可监听 `ready/error/download-error`。关闭按钮通过状态和关闭动画完成清理；传入 `parent` 后，页面销毁会自动释放所属弹窗。也可导入并调用 `closeAttachmentPreview()` 立即关闭当前弹窗；未传 `parent` 时应在业务卸载处显式调用。示例默认使用中文文案，不依赖 `$t()`；业务替换为国际化文案时，传入 `parent` 或同一应用的 `i18n` 实例。
+`fileUrl` 是可请求的附件地址，`fileName` 应携带原扩展名；无文件名时示例从 URL 路径推断。服务入口同一时间只保留一个弹窗，再次打开会销毁上一个；它返回 Vue 包装实例，可监听 `ready/error/download-error/watermark-error`，通过 `setWatermark()` / `getWatermark()` 更新和读取配置。水印 setter 等待实际提交，失败回滚期望配置；关闭会拒绝尚未完成的更新。关闭按钮通过状态和关闭动画完成清理；传入 `parent` 后，页面销毁会自动释放所属弹窗。也可导入并调用 `closeAttachmentPreview()` 立即关闭当前弹窗；未传 `parent` 时应在业务卸载处显式调用。示例默认使用中文文案，不依赖 `$t()`；业务替换为国际化文案时，传入 `parent` 或同一应用的 `i18n` 实例。
 
 组件属性及服务参数如下，函数签名中的 `signal` 均为 `AbortSignal`：
 
@@ -435,6 +478,7 @@ export default {
 | `fileUrl` / `fileName` | 附件 URL / 原文件名 |
 | `title` | 无文件名时的标题，默认“附件预览” |
 | `assetsBaseUrl` | 默认空，使用包内资源；自定义时传公开引擎目录 |
+| `watermark` | 默认 `null`；文字水印对象（0.2.0），参数见上文；组件按对象替换更新 |
 | `fetchFile({ fileUrl, fileName, signal })` | 默认同源 Cookie 的 `fetch`；自定义函数返回 `Promise<Blob \| ArrayBuffer \| Uint8Array>`，同时用于预览和默认下载 |
 | `downloadHandler({ fileUrl, fileName, signal })` | 可选，自行完成原文件下载并返回 Promise；用于审计或独立下载接口 |
 | `parent` / `i18n` | 仅服务式参数，提供 Vue 应用上下文 |

@@ -18,10 +18,12 @@
           v-if="previewMounted"
           ref="preview"
           :source="source"
+          :watermark="watermark"
           :assets-base-url="assetsBaseUrl"
           @ready="onReady"
           @statechange="onState"
           @error="onError"
+          @watermark-error="onWatermarkError"
         />
       </section>
       <section v-if="secondMounted" id="secondary" class="preview-panel">
@@ -50,6 +52,8 @@ export default {
     return {
       kinds: Object.keys(samples),
       source: null,
+      watermark: null,
+      watermarkErrors: [],
       secondSource: null,
       secondResult: null,
       previewMounted: true,
@@ -113,6 +117,10 @@ export default {
     onError(error) {
       this.errors.push({ code: error.code, message: error.message });
       this.status = error.message;
+    },
+
+    onWatermarkError(error) {
+      this.watermarkErrors.push({ code: error.code, message: error.message });
     },
   },
 };

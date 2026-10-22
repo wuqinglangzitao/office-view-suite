@@ -2,7 +2,7 @@
 
 SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM，在浏览器内解析文件，不使用 iframe，也不上传文件内容。`apps/*` 是使用同一 SDK 的演示应用。
 
-业务项目首次接入可先阅读 [0.1.2 使用文档](usage.md)，其中包含文件加载、缩放工具栏、剩余高度布局、Vue 2 和原文件下载示例。本文补充源码构建、安装包校验和部署契约。
+业务项目首次接入可先阅读 [使用文档](usage.md)，其中包含文件加载、缩放工具栏、剩余高度布局、Vue 2、文字水印和原文件下载示例。源码 `0.2.0` 尚未发布；私服已发布 `0.1.2` 不含水印。本文补充源码构建、安装包校验和部署契约。
 
 ## 构建与安装
 
@@ -112,7 +112,7 @@ try { await opening; } catch (error) { /* error.code === 'ABORTED' */ }
 
 ### 事件与错误
 
-`on(listener)` 返回取消订阅函数，事件包括 `statechange`、`warning`、`error`。状态依次可能为 `idle/loading/ready/error/destroyed`。后台 PDF 页面和 Excel 切表、滚动渲染错误通过 `error` 事件报告；接入方应同时处理 `open()` 的 Promise 拒绝和此事件。
+`on(listener)` 返回取消订阅函数，事件包括 `statechange`、`warning`、`error`、`watermarkerror`。状态依次可能为 `idle/loading/ready/error/destroyed`。后台 PDF 页面和 Excel 切表、滚动渲染错误通过 `error` 事件报告；接入方应同时处理 `open()` 的 Promise 拒绝和此事件。水印事件带有 `operation: initialize | update | refresh`，运行时更新失败不会改变文档状态；相同错误对象可按身份去重。
 
 | code | 含义 |
 | --- | --- |
@@ -121,6 +121,8 @@ try { await opening; } catch (error) { /* error.code === 'ABORTED' */ }
 | `ASSET_LOAD_FAILED` | Worker、WASM、PDFium 或适配器加载失败 |
 | `PARSE_FAILED` | 文档解析失败 |
 | `RENDER_FAILED` | DOM/Canvas 渲染失败 |
+| `INVALID_WATERMARK` | 非法水印配置或超出图块预算 |
+| `WATERMARK_FAILED` | 水印绘制、编码、加载或解码失败 |
 | `ABORTED` | 请求取消、被替换或预览被清空 |
 | `DESTROYED` | 实例已经销毁 |
 
@@ -132,6 +134,8 @@ viewer.setZoom('fit-width');     // 适应容器宽度，随 resize 调整
 console.log(viewer.getZoom());   // { mode: 'fixed' | 'fit-width', scale: number }
 console.log(viewer.getCapabilities()); // { zoom: true, fitWidth: true }
 ```
+
+文字水印接口为 `options.watermark`、`setWatermark(options | null): Promise<void>`、`getWatermark(): OfficeWatermarkConfig | null`。类型由公共 `viewer` 包导出。图块成功解码后才原子提交；配置按完整对象替换，getter 返回独立快照。`clear()` 保留已成功配置，取消在途更新；`destroy()` 清空配置和监听。初始配置失败会阻止 `open()`，直到成功重设或显式关闭；更新失败保留旧水印，错误码不转换成解析错误。详细参数和示例见[文字水印](usage.md#文字水印020)。
 
 默认比例为 1。缩放仅作用于 SDK 自己创建的内容，不修改宿主容器样式；非法比例返回 `INVALID_SOURCE`，销毁后设置比例返回 `DESTROYED`。这些接口只控制预览，不提供搜索、单元格/范围定位、选区编辑、打印或导出。
 
@@ -193,7 +197,7 @@ viewer.destroy();
 workerBlobs.forEach(url => URL.revokeObjectURL(url));
 ```
 
-资源服务器应返回正确的 JS/WASM MIME 类型并配置 CORS。CSP 需允许所选 Worker 来源、脚本/资源来源和 WebAssembly；采用 Blob 引导时还需允许 `worker-src blob:`。SDK 内部使用样式元素、内联样式和文档 data 图片，宿主应按自身策略允许这些能力。静态 CDN 只收到引擎资源请求，SDK 不向 CDN 发送文档 bytes。
+资源服务器应返回正确的 JS/WASM MIME 类型并配置 CORS。CSP 需允许所选 Worker 来源、脚本/资源来源和 WebAssembly；采用 Blob 引导时还需允许 `worker-src blob:`。SDK 内部使用样式元素、内联样式和文档 data 图片，宿主应按自身策略允许这些能力。水印 PNG 需要 `img-src` 允许 `data:`，被拦截时报告 `WATERMARK_FAILED`。静态 CDN 只收到引擎资源请求，SDK 不向 CDN 发送文档 bytes 或水印内容。
 
 ## 原生 ESM
 
@@ -225,6 +229,8 @@ Vue 2.7.16 + Vite 6.4.4 + `@vitejs/plugin-vue2` 2.3.4 已通过独立消费者�
 复用现有 Rust 解析器和 DOM 渲染器，因此不承诺和 Microsoft Office 像素级一致；字体是否安装、Office 特性覆盖和原解析器限制仍然适用。
 
 浏览器回归复用已安装的 Playwright，不增加 SDK 运行时依赖：先运行 `pnpm test:packages`，再运行 `PLAYWRIGHT_MODULE=/absolute/path/to/playwright/index.mjs pnpm test:browser`。截图和结果位于 `output/playwright/`。验证脚本只生成并校验本地安装包，不会自动发布到私服或 npm 公共仓库。
+
+水印另有 `test:watermark`（四格式像素、公开 API、失败回退、字体/DPR 与 CSP）和 `test:watermark:layout`（开启前后几何及滚动）。Vue 2 和 Element UI 弹窗分别执行 `test:vue2`、`test:attachment`，同样需指定 `PLAYWRIGHT_MODULE`。清空时移除水印监听；重开会重测并刷新缓存图块，以处理空闲期间的字体或 DPR 变化。
 
 `pnpm test:visual` 对比 Git 基线 `ee6dbbe` 的旧渲染器和打包 SDK，当前覆盖 6 个样本共 46 页／工作表，包括架构评审 PPT 的全部 39 页；另执行 9 组 Word 缩放与渐进分页检查。可用 `SDK_BASELINE_REF` 指定另一个包含旧渲染器的提交；该比较使用同一解析结果验证迁移前后渲染一致性，不表示与 Office 原软件像素一致。当前未通过的样例、预期界面调整及待核查项见[预览差异跟踪](known-preview-differences.md)。
 

@@ -1,6 +1,6 @@
 {
   "name": "@office-view-suite/viewer-pdf",
-  "version": "0.1.2",
+  "version": "0.2.0",
   "license": "Apache-2.0",
   "publishConfig": {
     "registry": "http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/"

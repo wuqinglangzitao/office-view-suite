@@ -29,10 +29,32 @@ export interface OfficeWorkerFactory {
   (url: URL, options?: WorkerOptions): Worker;
 }
 
+export interface OfficeWatermarkOptions {
+  content: string | readonly string[];
+  rotate?: number;
+  opacity?: number;
+  fontSize?: number;
+  fontFamily?: string;
+  color?: string;
+  /** Horizontal/vertical gaps between rotated text bounds, in CSS pixels. */
+  gap?: readonly [number, number];
+}
+
+export interface OfficeWatermarkConfig {
+  readonly content: readonly string[];
+  readonly rotate: number;
+  readonly opacity: number;
+  readonly fontSize: number;
+  readonly fontFamily: string;
+  readonly color: string;
+  readonly gap: readonly [number, number];
+}
+
 export interface OfficeViewerOptions {
   format?: OfficeFormat;
   assets?: OfficeAssetOptions;
   workerFactory?: OfficeWorkerFactory;
+  watermark?: OfficeWatermarkOptions | null;
 }
 
 export interface OfficeViewerError extends Error {
@@ -42,6 +64,8 @@ export interface OfficeViewerError extends Error {
     | 'ASSET_LOAD_FAILED'
     | 'PARSE_FAILED'
     | 'RENDER_FAILED'
+    | 'INVALID_WATERMARK'
+    | 'WATERMARK_FAILED'
     | 'ABORTED'
     | 'DESTROYED';
 }
@@ -64,6 +88,7 @@ export interface OfficeOpenResult {
 export type OfficeViewerEvent =
   | { type: 'statechange'; state: OfficeViewerState }
   | { type: 'warning'; code: string; message: string }
+  | { type: 'watermarkerror'; operation: 'initialize' | 'update' | 'refresh'; error: OfficeViewerError }
   | { type: 'error'; error: OfficeViewerError };
 
 export type OfficeViewerListener = (event: OfficeViewerEvent) => void;
@@ -81,6 +106,9 @@ export interface OfficeViewer {
   setZoom(zoom: OfficeZoom): void;
   getZoom(): OfficeZoomState;
   getCapabilities(): OfficeViewerCapabilities;
+  /** Atomically replace the text watermark; null disables it. */
+  setWatermark(value: OfficeWatermarkOptions | null): Promise<void>;
+  getWatermark(): OfficeWatermarkConfig | null;
   destroy(): void;
   on(listener: OfficeViewerListener): () => void;
 }

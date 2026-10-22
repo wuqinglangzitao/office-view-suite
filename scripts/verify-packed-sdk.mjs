@@ -54,6 +54,19 @@ const tsconfig = JSON.parse(await readFile(resolve(root, 'fixtures/vanilla-vite/
 delete tsconfig.compilerOptions.types;
 await writeFile(resolve(consumer, 'tsconfig.json'), JSON.stringify(tsconfig));
 await writeFile(resolve(consumer, 'src/env.d.ts'), 'interface ImportMeta { env: { BASE_URL: string }; hot?: { dispose(callback: () => void): void } }\n');
+// Check the public declarations from the installed tarball, including new API types.
+await writeFile(resolve(consumer, 'src/watermark-contract.ts'), `
+import type { OfficeViewer, OfficeViewerOptions, OfficeWatermarkOptions, OfficeWatermarkConfig } from '@office-view-suite/viewer';
+export async function watermarkContract(viewer: OfficeViewer): Promise<OfficeWatermarkConfig | null> {
+  const watermark: OfficeWatermarkOptions = { content: ['Internal'], gap: [120, 80] as const };
+  const options: OfficeViewerOptions = { watermark };
+  viewer.on(event => { if (event.type === 'watermarkerror') console.log(event.operation, event.error.code); });
+  await viewer.setWatermark(options.watermark ?? null);
+  const applied: OfficeWatermarkConfig | null = viewer.getWatermark();
+  await viewer.setWatermark(null);
+  return applied;
+}
+`);
 await writeFile(resolve(consumer, 'vite.config.js'), "export default { base: '/office-view/', build: { target: 'es2022' } };\n");
 await mkdir(resolve(consumer, 'public/samples'), { recursive: true });
 for (const [format, sample] of Object.entries({word:'styles-word.docx',excel:'styles-excel.xlsx',ppt:'styles-ppt.pptx',pdf:'handmade-mixed.pdf'})) {
