@@ -2,20 +2,20 @@
 
 SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM，在浏览器内解析文件，不使用 iframe，也不上传文件内容。`apps/*` 是使用同一 SDK 的演示应用。
 
-业务项目首次接入可先阅读 [使用文档](usage.md)，其中包含文件加载、缩放工具栏、剩余高度布局、Vue 2、文字水印和原文件下载示例。源码 `0.2.0` 尚未发布；私服已发布 `0.1.2` 不含水印。本文补充源码构建、安装包校验和部署契约。
+业务项目首次接入可先阅读 [使用文档](usage.md)，其中包含文件加载、缩放工具栏、剩余高度布局、Vue 2、文字水印和原文件下载示例。`0.2.0` 已发布到 npm 公共仓库；私服已发布 `0.1.2` 不含水印。本文补充源码构建、安装包校验和部署契约。
 
 ## 构建与安装
 
-SDK 的 ESM 包通过前端私服分发，公共入口会自动安装其余五个包：
+SDK 的 ESM 包可发布到 npm 公共仓库或公司私服，公共入口会自动安装其余五个包。以下使用默认 npm registry 安装：
 
 ```sh
-pnpm add @office-view-suite/viewer@0.1.2 --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+pnpm add @office-view-suite/viewer@0.2.0
 ```
 
-建议在消费者项目的 `.npmrc` 添加作用域配置，让传递依赖也从私服解析；不要在仓库中保存登录凭据：
+若消费者项目默认使用其他 registry，可在 `.npmrc` 添加作用域配置，让传递依赖也从 npm 公共仓库解析；不要在仓库中保存登录凭据：
 
 ```ini
-@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+@office-view-suite:registry=https://registry.npmjs.org/
 ```
 
 首次从源码构建：
@@ -31,14 +31,23 @@ pnpm test:packages
 
 `pnpm test:packages` 会将六个包打成 `.tgz`，在系统临时目录建立独立项目，仅从这些安装包安装运行时依赖，再执行类型检查和生产构建。临时项目路径记录在 `output/packed-consumer.json`。离线交付时需要提供全部六个安装包；该脚本给出了完整的本地依赖和 `pnpm.overrides` 配置。
 
-发布目标为各包 `publishConfig.registry` 中的 `npm-hosted`；安装使用聚合仓库 `npm-group`。发布前完成构建、打包和浏览器校验，再按 core、word、excel、ppt、pdf、viewer 的顺序发布验证过的 tarball，避免主入口引用尚未发布的依赖。发布鉴权沿用用户级 npm 配置。npm 8 会优先采用作用域 registry，发布时须同时覆盖该配置：
+发布目标在每次执行时显式选择；包的 `publishConfig` 不固定 registry，项目 `.npmrc` 也不覆盖用户 registry。`access: public` 表示作用域包的公开可见性，并不决定发布到哪个仓库。公网与私服独立维护版本和发布权限；切换目标时先查询目标中已有的版本。
+
+发布前完成构建、打包和浏览器校验，再按 core、word、excel、ppt、pdf、viewer 的顺序发布验证过的 tarball，避免主入口引用尚未发布的依赖。发布鉴权沿用用户级 npm 配置；不要把凭据写进仓库。下面选择一项目标后执行发布，同时覆盖普通 registry 与作用域 registry，兼容 npm 8 的作用域优先规则：
 
 ```sh
-npm publish /path/to/office-view-suite-viewer-core-0.1.2.tgz \
-  --registry=http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/ \
-  --@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-hosted/ \
-  --ignore-scripts
+# npm 公共仓库
+release_registry=https://registry.npmjs.org/
+# 公司私服发布目标（安装使用 npm-group，而非 npm-hosted）
+# release_registry="$PRIVATE_NPM_PUBLISH_REGISTRY"
+
+npm publish /path/to/office-view-suite-viewer-core-0.2.0.tgz \
+  --registry="$release_registry" \
+  --@office-view-suite:registry="$release_registry" \
+  --access public --ignore-scripts
 ```
+
+使用 `pnpm pack` 生成安装包，确保 `workspace:*` 被转换为具体版本。历史安装包可能仍含固定的 `publishConfig.registry`，切换目标时应使用当前配置重新打包，检查 `package/package.json` 后再发布。
 
 Rust 源码和各自的 Cargo.lock 位于 `packages/viewer-{word,excel,ppt,pdf}/rs/`，生成的 WASM/glue 位于同包的 `src/wasm/`。`pnpm wasm` 使用 `--locked` 构建并记录源码、vendor、仓库 Cargo 配置、工具链声明、构建脚本及输出文件的指纹。SDK 构建会拒绝缺失或过期的产物，并提示 `pnpm wasm:<格式>`；TypeScript 修改无需重建 WASM。指纹用于防止本地源码与生成产物错配，不是跨平台逐字节可复现构建的证明。PDFium 本体是 `third_party/pdfium/` 中的上游预编译产物，`wasm:pdf` 只编译本项目 Rust glue。
 

@@ -1,6 +1,6 @@
 # Office View Suite 使用文档
 
-适用版本：源码 `@office-view-suite/viewer@0.2.0`（尚未发布）；私服已发布 `0.1.2` 可使用原有接口，水印需本次源码打包产物。更新日期：2026-10-22。
+适用版本：`@office-view-suite/viewer@0.2.0`（npm 公共仓库已发布）；私服 `0.1.2` 不含水印。更新日期：2026-10-22。
 
 本文面向业务前端开发人员，介绍如何将文档预览嵌入页面、上传组件和附件弹窗。SDK 使用原生 DOM、Shadow DOM、Worker 和 WASM 在浏览器内解析文件，PDF 使用 PDFium 渲染，无需 iframe；SDK 不上传文档内容。
 
@@ -21,19 +21,19 @@ SDK 提供解析、渲染、缩放、事件和资源释放接口。文件选择�
 
 ## 安装
 
-在业务项目的 `.npmrc` 中添加公司私服作用域：
+若业务项目默认使用其他 registry，在 `.npmrc` 中指定公网 npm 作用域：
 
 ```ini
-@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
+@office-view-suite:registry=https://registry.npmjs.org/
 ```
 
 安装公共入口：
 
 ```sh
-pnpm add @office-view-suite/viewer@0.1.2
+pnpm add @office-view-suite/viewer@0.2.0
 ```
 
-使用 npm 的项目可执行 `npm install @office-view-suite/viewer@0.1.2`。其余五个 SDK 包会作为依赖自动安装。私服访问与登录沿用公司 npm 配置，凭据保存在用户级配置中。
+使用 npm 的项目可执行 `npm install @office-view-suite/viewer@0.2.0`。其余五个 SDK 包会作为依赖自动安装。公共包安装无需登录；发布者的 npm 凭据保存在用户级配置中。
 
 消费已发布的安装包不需要 Rust、`wasm-pack` 或本地 `vendor/office-view-suite`。离线安装需要同时提供六个 SDK 安装包，具体见 [构建与安装](sdk.md#构建与安装)。
 

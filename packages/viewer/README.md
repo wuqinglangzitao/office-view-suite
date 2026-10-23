@@ -2,6 +2,14 @@
 
 浏览器端 Word、Excel、PowerPoint 和 PDF 预览 SDK。原生 DOM、Shadow DOM、Worker、WASM，无 iframe。
 
+当前版本 **0.2.0**，已发布到 [npm](https://www.npmjs.com/package/@office-view-suite/viewer)。
+
+```sh
+pnpm add @office-view-suite/viewer@0.2.0
+# 或使用 npm
+npm install @office-view-suite/viewer@0.2.0
+```
+
 ```ts
 import { createOfficeViewer } from '@office-view-suite/viewer';
 
@@ -11,9 +19,9 @@ await viewer.open({ bytes: file, name: file.name });
 viewer.destroy();
 ```
 
-支持 `Blob`、`ArrayBuffer`、`Uint8Array`，提供 `open/clear/resize/destroy/on`。Worker 和 WASM 默认从包内资源加载，也可以配置 `assets.baseUrl` 和 `workerFactory`。请在支持 WebAssembly、Web Worker 和 Shadow DOM 的浏览器中使用。
+支持 `Blob`、`ArrayBuffer`、`Uint8Array`，提供 `open/clear/resize/destroy/on`、缩放和文字水印接口。Worker 和 WASM 默认从包内资源加载，也可以配置 `assets.baseUrl` 和 `workerFactory`。请在支持 WebAssembly、Web Worker 和 Shadow DOM 的浏览器中使用。
 
-完整接入、静态资源、取消和错误处理说明见仓库的 [docs/sdk.md](https://github.com/wuqinglangzitao/office-view-suite/blob/main/docs/sdk.md)。当前为本地构建版本，尚未发布 npm。
+完整接入、静态资源、取消和错误处理说明见仓库的 [docs/sdk.md](https://github.com/wuqinglangzitao/office-view-suite/blob/main/docs/sdk.md)。支持通过 `options.watermark` 初始化水印，使用 `await viewer.setWatermark({ content: ['内部资料'] })` 更新，使用 `await viewer.setWatermark(null)` 关闭。水印不修改原文件。
 
 ## 许可证
 

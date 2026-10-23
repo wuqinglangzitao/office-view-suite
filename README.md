@@ -4,13 +4,13 @@
 
 文件由 Worker 与 Rust/WASM 在浏览器内解析，SDK 不上传文档内容。通过原生 DOM、Shadow DOM 和 Canvas 渲染，无需 iframe；支持多实例、取消加载和组件卸载时释放资源。
 
-源码 SDK 版本为 **0.2.0**（新增文字水印，尚未发布）；已发布版本为 **0.1.2**。ESM 包通过公司前端私服分发，也支持从源码构建和离线安装。业务项目直接调用 SDK；文件选择、工具栏和下载交互由宿主应用提供。
+SDK **0.2.0** 已发布到 [npm](https://www.npmjs.com/package/@office-view-suite/viewer)，支持文字水印，也支持从源码构建和离线安装。业务项目直接调用 SDK；文件选择、工具栏和下载交互由宿主应用提供。
 
-项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。源码入口：[公司 GitLab](http://git.dev.e6gpshk.com/202009271967/office-view-suite) · [GitHub](https://github.com/wuqinglangzitao/office-view-suite)。
+项目原创代码采用 [Apache-2.0](LICENSE)，允许商业使用，分发要求见[项目许可证](#项目许可证)。源码入口：[GitHub](https://github.com/wuqinglangzitao/office-view-suite)。
 
 [使用文档](docs/usage.md) · [SDK 接入](#sdk-接入) · [Vue 2 + Vite](docs/vue2.md) · [缩放与容器布局](#缩放与容器布局) · [源码开发](#源码开发) · [已知预览差异](docs/known-preview-differences.md) · [解析依赖与许可证](#解析依赖与许可证)
 
-文字水印：源码 `0.2.0` 支持初始化、运行时替换/关闭、多行文字和样式配置，覆盖四类预览且不随文档缩放。[使用方式](docs/usage.md#文字水印020) · [设计与边界](docs/superpowers/specs/2026-10-22-office-viewer-watermark-design.md)。已发布 `0.1.2` 不含此 API。
+文字水印：`0.2.0` 支持初始化、运行时替换/关闭、多行文字和样式配置，覆盖四类预览且不随文档缩放。[使用方式](docs/usage.md#文字水印020) · [设计与边界](docs/superpowers/specs/2026-10-22-office-viewer-watermark-design.md)。
 
 ## 支持格式
 
@@ -27,19 +27,17 @@
 
 ### 安装
 
-公共入口为 `@office-view-suite/viewer`，会自动安装其余五个 SDK 包。安装已发布的包不需要 Rust 或 `wasm-pack`；需能够访问公司私服。
+公共入口为 `@office-view-suite/viewer`，会自动安装其余五个 SDK 包。安装已发布的包不需要 Rust 或 `wasm-pack`。
 
-在业务项目的 `.npmrc` 添加作用域配置：
-
-```ini
-@office-view-suite:registry=http://npm.dev.e6gpshk.com:38085/repository/npm-group/
-```
+使用默认 npm registry 安装：
 
 ```sh
-pnpm add @office-view-suite/viewer@0.1.2
+pnpm add @office-view-suite/viewer@0.2.0
+# 或使用 npm
+npm install @office-view-suite/viewer@0.2.0
 ```
 
-鉴权沿用用户级 npm 配置，不要将凭据写入项目仓库。离线 `.tgz` 安装、源码打包及私服发布方式见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
+公网包安装无需登录；自定义 registry 和发布鉴权沿用用户级 npm 配置，不要将凭据写入项目仓库。离线 `.tgz` 安装、源码打包及公网/私服切换发布方式见 [SDK 构建与安装](docs/sdk.md#构建与安装)。
 
 ### Vite 配置
 
@@ -117,6 +115,23 @@ export function disposePreview() {
 
 自行部署静态资源或使用 CDN 时，需要保留资源目录并配置 URL、CORS 与 CSP，同时部署第三方许可材料。完整 API、取消操作、原生 ESM 及部署示例见 [SDK 接入文档](docs/sdk.md)。
 
+## 文字水印
+
+创建实例时设置文字水印，也可以在运行时替换或关闭：
+
+```ts
+const viewer = createOfficeViewer(container, {
+  watermark: { content: ['内部资料', '仅供预览'] },
+});
+
+await viewer.open({ bytes: file, name: file.name });
+await viewer.setWatermark({ content: ['更新后的水印'] });
+console.log(viewer.getWatermark());
+await viewer.setWatermark(null); // 关闭水印
+```
+
+水印覆盖 Word、Excel、PowerPoint 和 PDF 预览，不随文档缩放，也不修改原文件。异步更新成功后才替换旧水印；样式、错误事件和 CSP 配置见[文字水印说明](docs/usage.md#文字水印020)。
+
 ## 缩放与容器布局
 
 业务工具栏可通过以下接口设置比例、显示当前百分比和还原：
@@ -164,7 +179,7 @@ viewer.setZoom('fit-width');                 // 按需适应容器宽度
 ### 启动演示
 
 ```sh
-git clone http://git.dev.e6gpshk.com/202009271967/office-view-suite.git
+git clone https://github.com/wuqinglangzitao/office-view-suite.git
 cd office-view-suite
 pnpm install
 pnpm wasm       # 首次检出或修改 Rust 构建输入后执行
@@ -280,6 +295,6 @@ Word、Excel、PPT 使用 Rust/WASM 解析，再由本项目渲染器展示。PP
 
 已验证 Chrome 下的 Vite 生产构建、原生 ESM、多实例、取消/替换加载、资源路径覆盖及销毁流程。SDK 需要支持 Worker、WebAssembly、Shadow DOM、ResizeObserver 的现代浏览器；PDF 懒渲染还使用 IntersectionObserver。
 
-Vue 2.7.16 + Vite 6.4.4 已通过开发/生产及两种资源部署方式的 44 项接入检查；包括四格式渲染、文件切换、组件卸载和 Worker 释放。可复制组件与验证步骤见 [Vue 2 接入文档](docs/vue2.md)。
+Vue 2.7.16 + Vite 6.4.4 已通过开发/生产及两种资源部署方式的 56 项接入检查；包括四格式渲染、文件切换、组件卸载和 Worker 释放。可复制组件与验证步骤见 [Vue 2 接入文档](docs/vue2.md)。
 
 SSR、UMD 不在当前支持范围；Webpack/Rollup 独立接入及 Safari/Firefox 尚未完成实测。视觉回归用于验证 SDK 迁移前后的渲染一致性，不代表与 Office 原软件逐像素一致。

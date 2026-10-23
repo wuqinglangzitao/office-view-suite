@@ -16,10 +16,10 @@ pnpm dev:vue2
 
 ## 安装与 Vite 配置
 
-SDK 当前通过公司前端私服分发。先按 [构建与安装](sdk.md#构建与安装) 配置项目 `.npmrc` 中的 `@office-view-suite` 作用域 registry，再安装公共入口：
+SDK 支持 npm 公共仓库和公司私服；以下使用公网示例。若项目默认使用其他 registry，先按 [构建与安装](sdk.md#构建与安装) 配置项目 `.npmrc` 中的 `@office-view-suite` 作用域 registry，再安装公共入口：
 
 ```sh
-pnpm add @office-view-suite/viewer@0.1.2
+pnpm add @office-view-suite/viewer@0.2.0
 ```
 
 其余五个 SDK 包会自动安装，已有 Vue 应用应保留自己的 Vue 依赖。离线交付时，也可按上述文档生成六个安装包，复制验证消费者的 `tarballs/`，将其 `dependencies` 和 `pnpm.overrides` 中的六个本地包映射合并到业务项目，再执行 `pnpm install`。
@@ -184,7 +184,7 @@ try {
 
 prop 更新需要等待 Vue watcher 和异步绘制完成；`$nextTick()` 本身不表示水印已应用。`getWatermark()` 返回成功应用的快照；命令式 setter 不会反向修改父组件的 prop。
 
-`watermark-error` 独立于预览错误；运行时水印更新失败会保留旧水印，不禁用已有文档的缩放或下载。附件服务 `openAttachmentPreview({ ..., watermark })` 返回的包装实例同样提供异步 setter/getter，setter 等待真实提交；关闭时取消待处理更新。水印仅影响预览，下载仍为原文件。已发布的 `0.1.2` 不含这些接口，请使用源码打包的 `0.2.0`。
+`watermark-error` 独立于预览错误；运行时水印更新失败会保留旧水印，不禁用已有文档的缩放或下载。附件服务 `openAttachmentPreview({ ..., watermark })` 返回的包装实例同样提供异步 setter/getter，setter 等待真实提交；关闭时取消待处理更新。水印仅影响预览，下载仍为原文件。私服 `0.1.2` 不含这些接口，请使用公网 `0.2.0` 或同版本源码打包产物。
 
 ## 重复验证
 
